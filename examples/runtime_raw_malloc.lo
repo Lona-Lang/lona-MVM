@@ -1,0 +1,16 @@
+#[extern "C"]
+def malloc(size usize) u8*
+
+#[extern "C"]
+def free(ptr u8*)
+
+def main() i32 {
+    var payload = malloc(16_usize)
+    if payload == null {
+        ret 10
+    }
+    free(payload)
+    ret 0
+}
+
+ret main()

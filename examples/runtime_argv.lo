@@ -1,0 +1,29 @@
+#[extern]
+global __lona_argc i32
+
+#[extern]
+global __lona_argv u8 const[*][*]
+
+def main() i32 {
+    if __lona_argc != 2 {
+        ret 10
+    }
+    if __lona_argv == null {
+        ret 11
+    }
+    if __lona_argv(1) == null {
+        ret 12
+    }
+    if __lona_argv(1)(0) != 'f' {
+        ret 13
+    }
+    if __lona_argv(1)(1) != 'o' {
+        ret 14
+    }
+    if __lona_argv(1)(2) != 'o' {
+        ret 15
+    }
+    ret 0
+}
+
+ret main()

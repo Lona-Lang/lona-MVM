@@ -1,0 +1,7 @@
+def main() i32 {
+    var answer i32 = 40
+    answer = answer + 2
+    ret answer - 42
+}
+
+ret main()

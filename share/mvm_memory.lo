@@ -1,0 +1,78 @@
+// Repo-local MVM managed memory library draft.
+// This module is written in lona source and mirrors the current low-level
+// runtime ABI exported by the host MVM process.
+
+#[extern "C"]
+def __mvm_malloc(size usize, alignment usize) u8*
+
+#[extern "C"]
+def __mvm_malloc_array(element_size usize, element_count usize, alignment usize) u8*
+
+#[extern "C"]
+def __mvm_free(ptr u8*)
+
+#[extern "C"]
+def __mvm_allocation_size(ptr u8*) usize
+
+#[extern "C"]
+def __mvm_array_length(ptr u8*) usize
+
+#[extern "C"]
+def __mvm_array_element_size(ptr u8*) usize
+
+#[extern "C"]
+def __mvm_bounds_check(ptr u8*, start_index usize, access_width usize)
+
+def malloc(size usize, alignment usize) u8* {
+    ret __mvm_malloc(size, alignment)
+}
+
+def mallocArray(element_size usize, element_count usize, alignment usize) u8[*] {
+    ret cast[u8[*]](__mvm_malloc_array(element_size, element_count, alignment))
+}
+
+def free(ptr u8*) {
+    __mvm_free(ptr)
+}
+
+def allocationSize(ptr u8*) usize {
+    ret __mvm_allocation_size(ptr)
+}
+
+def arrayLength(ptr u8[*]) usize {
+    ret __mvm_array_length(cast[u8*](ptr))
+}
+
+def arrayElementSize(ptr u8[*]) usize {
+    ret __mvm_array_element_size(cast[u8*](ptr))
+}
+
+def boundsCheck(ptr u8[*], start_index usize, access_width usize) {
+    __mvm_bounds_check(cast[u8*](ptr), start_index, access_width)
+}
+
+def mallocObject[T](alignment usize) T* {
+    ret cast[T*](__mvm_malloc(sizeof[T](), alignment))
+}
+
+def mallocArrayOf[T](element_count usize, alignment usize) T[*] {
+    ret cast[T[*]](
+        __mvm_malloc_array(sizeof[T](), element_count, alignment)
+    )
+}
+
+def freeObject[T](ptr T*) {
+    __mvm_free(cast[u8*](ptr))
+}
+
+def freeArray[T](ptr T[*]) {
+    __mvm_free(cast[u8*](ptr))
+}
+
+def arrayLengthOf[T](ptr T[*]) usize {
+    ret __mvm_array_length(cast[u8*](ptr))
+}
+
+def boundsCheckOf[T](ptr T[*], start_index usize, access_width usize) {
+    __mvm_bounds_check(cast[u8*](ptr), start_index, access_width)
+}

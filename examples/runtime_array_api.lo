@@ -1,0 +1,39 @@
+#[extern "C"]
+def __mvm_malloc_array(element_size usize, element_count usize, alignment usize) u32[*]
+
+#[extern "C"]
+def __mvm_free(payload u32[*])
+
+#[extern "C"]
+def __mvm_allocation_size(payload u32[*]) usize
+
+#[extern "C"]
+def __mvm_array_length(payload u32[*]) usize
+
+#[extern "C"]
+def __mvm_array_element_size(payload u32[*]) usize
+
+def main() i32 {
+    var values = __mvm_malloc_array(sizeof[u32](), 4_usize, 4_usize)
+    if values == null {
+        ret 10
+    }
+    if __mvm_array_length(values) != 4_usize {
+        ret 11
+    }
+    if __mvm_array_element_size(values) != sizeof[u32]() {
+        ret 12
+    }
+    if __mvm_allocation_size(values) != sizeof[u32]() * 4_usize {
+        ret 13
+    }
+    values(0) = 21_u32
+    values(3) = 34_u32
+    if values(0) != 21_u32 || values(3) != 34_u32 {
+        ret 14
+    }
+    __mvm_free(values)
+    ret 0
+}
+
+ret main()
