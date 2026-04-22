@@ -1,5 +1,7 @@
 #include "mvm/runtime_memory.hh"
 
+#include "mvm/gc.hh"
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -155,8 +157,12 @@ extern "C" void *__mvm_malloc(std::uint64_t size, std::uint64_t alignment) {
         return nullptr;
     }
 
-    return allocateTracked(AllocationKind::Object, payloadSize, 1,
-                           requestedAlignment);
+    auto *payload = allocateTracked(AllocationKind::Object, payloadSize, 1,
+                                   requestedAlignment);
+    if (payload) {
+        mvm::recordManagedAllocation(payloadSize);
+    }
+    return payload;
 }
 
 extern "C" void *__mvm_array_malloc(std::uint64_t element_size,
@@ -179,30 +185,29 @@ extern "C" void *__mvm_array_malloc(std::uint64_t element_size,
         return nullptr;
     }
 
-    return allocateTracked(AllocationKind::Array, payloadSize, elementCount,
-                           requestedAlignment);
+    auto *payload = allocateTracked(AllocationKind::Array, payloadSize, elementCount,
+                                    requestedAlignment);
+    if (payload) {
+        mvm::recordManagedAllocation(payloadSize);
+    }
+    return payload;
 }
 
 extern "C" void __mvm_free(void *payload) {
-    if (!payload) {
-        return;
-    }
-
-    auto *header = checkedHeader(payload, "__mvm_free", AllocationKind::Object);
-    std::free(header->allocationBase);
+    // Managed deallocation is moving to GC ownership. Keep the symbol as a
+    // temporary no-op until callers are migrated away from explicit free.
+    (void)payload;
 }
 
 extern "C" void __mvm_array_free(void *payload) {
-    if (!payload) {
-        return;
-    }
-
-    auto *header =
-        checkedHeader(payload, "__mvm_array_free", AllocationKind::Array);
-    std::free(header->allocationBase);
+    // Managed deallocation is moving to GC ownership. Keep the symbol as a
+    // temporary no-op until callers are migrated away from explicit free.
+    (void)payload;
 }
 
 extern "C" std::uint64_t __mvm_array_length(const void *payload) {
+    mvm::handlePendingRuntimeGCSafepoint(
+        reinterpret_cast<std::uintptr_t *>(__builtin_frame_address(0)));
     auto *header =
         checkedHeader(payload, "__mvm_array_length", AllocationKind::Array);
     return header->elementCount;

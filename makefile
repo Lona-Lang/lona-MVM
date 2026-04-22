@@ -21,6 +21,9 @@ TARGET := $(OUT_DIR)/mvm
 RUNTIME_MEMORY_TEST_SOURCE := $(ROOT)/tests/runtime_memory_test.cc
 RUNTIME_MEMORY_TEST_OBJECT := $(patsubst %.cc,$(OUT_DIR)/%.o,$(RUNTIME_MEMORY_TEST_SOURCE))
 RUNTIME_MEMORY_OBJECT := $(OUT_DIR)/src/mvm/runtime_memory.o
+RUNTIME_MEMORY_SUPPORT_OBJECTS := $(OUT_DIR)/src/mvm/error.o \
+	$(OUT_DIR)/src/mvm/gc.o \
+	$(OUT_DIR)/src/mvm/runtime_threads.o
 RUNTIME_MEMORY_TEST_TARGET := $(OUT_DIR)/runtime_memory_test
 GC_ROOT_SCAN_TEST_SOURCE := $(ROOT)/tests/gc_root_scan_test.cc
 GC_ROOT_SCAN_TEST_OBJECT := $(patsubst %.cc,$(OUT_DIR)/%.o,$(GC_ROOT_SCAN_TEST_SOURCE))
@@ -54,6 +57,8 @@ IR_PIPELINE_DEMO_BC := $(OUT_DIR)/examples/ir_pipeline_demo.bc
 IR_PIPELINE_DEMO_AFTER_LL := $(OUT_DIR)/examples/ir_pipeline_demo.after.ll
 GC_ROOT_SCAN_LO := $(ROOT)/examples/gc_root_scan.lo
 GC_ROOT_SCAN_BC := $(OUT_DIR)/examples/gc_root_scan.bc
+GC_AUTO_TRIGGER_LO := $(ROOT)/examples/gc_auto_trigger.lo
+GC_AUTO_TRIGGER_BC := $(OUT_DIR)/examples/gc_auto_trigger.bc
 
 .PHONY: all clean test ir-demo
 
@@ -64,11 +69,12 @@ ir-demo: $(TARGET) $(IR_PIPELINE_DEMO_RAW_LL) $(IR_PIPELINE_DEMO_AFTER_LL)
 test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(GC_ROOT_SCAN_TEST_TARGET) $(EXAMPLE_BC) \
 	$(STATIC_ARRAY_OK_BC) $(STATIC_ARRAY_OOB_BC) $(NO_DEBUG_BC) \
 	$(INVALID_BC) $(RUNTIME_ARRAY_API_BC) $(RUNTIME_ARRAY_API_MBC) \
-	$(RUNTIME_ARRAY_OOB_BC) $(GC_ROOT_SCAN_BC) \
+	$(RUNTIME_ARRAY_OOB_BC) $(GC_ROOT_SCAN_BC) $(GC_AUTO_TRIGGER_BC) \
 	$(RUNTIME_ARGV_BC) $(MANAGED_STATE_BC) $(MANAGED_DISPATCH_BC) \
 	$(INVALID_RAW_MALLOC_BC) $(INVALID_ELEMENT_ADDRESS_STDERR)
 	$(RUNTIME_MEMORY_TEST_TARGET)
 	$(GC_ROOT_SCAN_TEST_TARGET) $(GC_ROOT_SCAN_BC)
+	$(GC_ROOT_SCAN_TEST_TARGET) $(GC_AUTO_TRIGGER_BC)
 	$(TARGET) --dump-ir $(EXAMPLE_BC) | rg 'llvm\.experimental\.gc\.statepoint|gc "statepoint-example"'
 	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'mvm\.managed\.signature|arg0=array'
 	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'ptr addrspace\(1\)|llvm\.experimental\.gc\.relocate\.p1'
@@ -97,9 +103,9 @@ $(TARGET): $(MAIN_OBJECT) $(LIBRARY_OBJECTS)
 	$(CXX) $^ $(CXXFLAGS) $(INCLUDE_PATHS) $(LLVM_LD_FLAGS) \
 		$(EXPORT_DYNAMIC_FLAGS) -o $@
 
-$(RUNTIME_MEMORY_TEST_TARGET): $(RUNTIME_MEMORY_OBJECT) $(RUNTIME_MEMORY_TEST_OBJECT)
+$(RUNTIME_MEMORY_TEST_TARGET): $(RUNTIME_MEMORY_OBJECT) $(RUNTIME_MEMORY_SUPPORT_OBJECTS) $(RUNTIME_MEMORY_TEST_OBJECT)
 	mkdir -p $(dir $@)
-	$(CXX) $^ $(CXXFLAGS) $(INCLUDE_PATHS) -o $@
+	$(CXX) $^ $(CXXFLAGS) $(INCLUDE_PATHS) $(LLVM_LD_FLAGS) -o $@
 
 $(GC_ROOT_SCAN_TEST_TARGET): $(LIBRARY_OBJECTS) $(GC_ROOT_SCAN_TEST_OBJECT)
 	mkdir -p $(dir $@)
@@ -176,6 +182,10 @@ $(IR_PIPELINE_DEMO_BC): $(IR_PIPELINE_DEMO_LO) makefile
 	$(LONA_IR) --emit mbc --verify-ir -g $< $@
 
 $(GC_ROOT_SCAN_BC): $(GC_ROOT_SCAN_LO) makefile
+	mkdir -p $(dir $@)
+	$(LONA_IR) --emit mbc --verify-ir -g $< $@
+
+$(GC_AUTO_TRIGGER_BC): $(GC_AUTO_TRIGGER_LO) makefile
 	mkdir -p $(dir $@)
 	$(LONA_IR) --emit mbc --verify-ir -g $< $@
 

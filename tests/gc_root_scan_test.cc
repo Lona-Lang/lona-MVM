@@ -40,5 +40,9 @@ int main(int argc, char **argv) {
             "root scan summary reported an invalid location count");
     require(summary.nonNullRootCount != 0,
             "root scan did not observe any non-null managed roots");
+    require(summary.mutatorCount != 0,
+            "root scan summary did not record any parked mutators");
+    require(summary.gcCycle != 0,
+            "root scan summary did not record a completed GC cycle");
     return 0;
 }

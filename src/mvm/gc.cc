@@ -1,6 +1,7 @@
 #include "mvm/gc.hh"
 
 #include "mvm/error.hh"
+#include "mvm/runtime_threads.hh"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -39,6 +40,7 @@ constexpr std::uint16_t kX86_64RBPDwarfRegister = 6;
 constexpr std::uint16_t kX86_64RSPDwarfRegister = 7;
 constexpr std::size_t kStackMapHeaderSize = 16;
 constexpr std::size_t kStackMapFunctionRecordSize = 24;
+constexpr std::uint64_t kDefaultGCAllocationThresholdBytes = 4096;
 
 struct FunctionGCInfo {
     unsigned statepointCount = 0;
@@ -47,6 +49,7 @@ struct FunctionGCInfo {
 };
 
 std::atomic<bool> gcRequested{false};
+std::atomic<std::uint64_t> gcAllocatedBytes{0};
 
 std::mutex installedStackMapRegistryMutex;
 std::shared_ptr<GCStackMapRegistry> installedStackMapRegistry;
@@ -387,7 +390,14 @@ void rememberCurrentRuntimeSafepointOrFatal(std::uintptr_t *runtimeFrame) {
         auto message = renderError(summaryOrErr.takeError());
         llvm::report_fatal_error(llvm::StringRef(message));
     }
+
+    if (parkCurrentMutatorForGC(*summaryOrErr)) {
+        return;
+    }
+
     rememberLastRootScanSummary(*summaryOrErr);
+    clearGCRequest();
+    resetGCAllocationBudget();
 }
 
 llvm::Expected<std::uint64_t> readStackMapConstant(
@@ -868,6 +878,10 @@ void unregisterMutatorThread() {
     currentThreadIsMutator = false;
 }
 
+void recordLastRootScanSummary(const GCRootScanSummary &summary) {
+    rememberLastRootScanSummary(summary);
+}
+
 void clearLastRootScanSummary() {
     rememberLastRootScanSummary({});
 }
@@ -877,8 +891,28 @@ GCRootScanSummary getLastRootScanSummary() {
     return lastRootScanSummary;
 }
 
+void recordManagedAllocation(std::uint64_t bytes) {
+    if (bytes == 0) {
+        return;
+    }
+
+    auto total =
+        gcAllocatedBytes.fetch_add(bytes, std::memory_order_acq_rel) + bytes;
+    if (total >= kDefaultGCAllocationThresholdBytes) {
+        requestGC();
+    }
+}
+
+void resetGCAllocationBudget() {
+    gcAllocatedBytes.store(0, std::memory_order_release);
+}
+
 void requestGC() {
-    gcRequested.store(true, std::memory_order_release);
+    auto alreadyRequested =
+        gcRequested.exchange(true, std::memory_order_acq_rel);
+    if (!alreadyRequested) {
+        notifyRuntimeGCRequested();
+    }
 }
 
 void clearGCRequest() {
@@ -889,6 +923,26 @@ bool isGCRequested() {
     return gcRequested.load(std::memory_order_acquire);
 }
 
+void handlePendingRuntimeGCSafepoint(std::uintptr_t *runtimeFrame) {
+    if (!isGCRequested()) {
+        return;
+    }
+
+    if (!currentThreadIsMutator) {
+        clearGCRequest();
+        return;
+    }
+
+    auto registry = getInstalledGCStackMapRegistry();
+    if (!registry) {
+        clearGCRequest();
+        return;
+    }
+
+    (void)registry;
+    rememberCurrentRuntimeSafepointOrFatal(runtimeFrame);
+}
+
 }  // namespace mvm
 
 extern "C" void __mvm_request_gc() {
@@ -896,8 +950,7 @@ extern "C" void __mvm_request_gc() {
     if (mvm::currentThreadIsMutator && mvm::getInstalledGCStackMapRegistry()) {
         auto *runtimeFrame =
             reinterpret_cast<std::uintptr_t *>(__builtin_frame_address(0));
-        mvm::rememberCurrentRuntimeSafepointOrFatal(runtimeFrame);
-        mvm::clearGCRequest();
+        mvm::handlePendingRuntimeGCSafepoint(runtimeFrame);
     }
 }
 
@@ -906,20 +959,7 @@ extern "C" __attribute__((noinline)) void __mvm_gc_safepoint_poll() {
         return;
     }
 
-    if (!mvm::currentThreadIsMutator) {
-        mvm::clearGCRequest();
-        return;
-    }
-
-    auto registry = mvm::getInstalledGCStackMapRegistry();
-    if (!registry) {
-        mvm::clearGCRequest();
-        return;
-    }
-
-    (void)registry;
     auto *runtimeFrame =
         reinterpret_cast<std::uintptr_t *>(__builtin_frame_address(0));
-    mvm::rememberCurrentRuntimeSafepointOrFatal(runtimeFrame);
-    mvm::clearGCRequest();
+    mvm::handlePendingRuntimeGCSafepoint(runtimeFrame);
 }

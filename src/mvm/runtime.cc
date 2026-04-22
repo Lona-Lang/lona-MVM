@@ -89,6 +89,7 @@ llvm::Expected<int> runManagedProgram(const Options &options) {
     }
 
     RuntimeThreads runtimeThreads;
+    installRuntimeThreads(runtimeThreads);
 
     std::promise<llvm::Expected<int>> resultPromise;
     auto resultFuture = resultPromise.get_future();
@@ -105,6 +106,7 @@ llvm::Expected<int> runManagedProgram(const Options &options) {
             installGCStackMapRegistry(executor->getStackMaps());
             registerMutatorThread();
             clearGCRequest();
+            resetGCAllocationBudget();
             clearLastRootScanSummary();
             auto exitCodeOrErr = executor->invoke(entry, argv0, args);
             unregisterMutatorThread();
@@ -114,6 +116,7 @@ llvm::Expected<int> runManagedProgram(const Options &options) {
         });
 
     mutatorThread.join();
+    clearRuntimeThreads();
     return resultFuture.get();
 }
 

@@ -49,6 +49,8 @@ struct GCRootScanSummary {
     std::size_t rootPairCount = 0;
     std::size_t rootLocationCount = 0;
     std::size_t nonNullRootCount = 0;
+    std::size_t mutatorCount = 0;
+    std::uint64_t gcCycle = 0;
 };
 
 class GCStackMapRegistry {
@@ -77,15 +79,19 @@ void installGCStackMapRegistry(std::shared_ptr<GCStackMapRegistry> registry);
 void clearGCStackMapRegistry();
 void registerMutatorThread();
 void unregisterMutatorThread();
+void recordLastRootScanSummary(const GCRootScanSummary &summary);
 void clearLastRootScanSummary();
 GCRootScanSummary getLastRootScanSummary();
 
 llvm::Error runManagedGCPasses(llvm::Module &module,
                                llvm::ModuleAnalysisManager &moduleAnalysisManager);
 
+void recordManagedAllocation(std::uint64_t bytes);
+void resetGCAllocationBudget();
 void requestGC();
 void clearGCRequest();
 bool isGCRequested();
+void handlePendingRuntimeGCSafepoint(std::uintptr_t *runtimeFrame);
 
 }  // namespace mvm
 
