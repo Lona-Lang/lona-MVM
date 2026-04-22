@@ -45,6 +45,7 @@ public:
 
     llvm::Error run();
     PointerState getValueState(const llvm::Value &value) const;
+    PointerState getSlotState(const llvm::Value &slot) const;
     const FunctionState &getFunctionState(const llvm::Function &function) const;
     void attachMetadata();
 

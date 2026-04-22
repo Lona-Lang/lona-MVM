@@ -114,6 +114,14 @@ PointerState ManagedStateAnalysis::getValueState(const llvm::Value &value) const
     return stateIt->second;
 }
 
+PointerState ManagedStateAnalysis::getSlotState(const llvm::Value &slot) const {
+    auto stateIt = slotStates_.find(&slot);
+    if (stateIt == slotStates_.end()) {
+        return {};
+    }
+    return stateIt->second;
+}
+
 const FunctionState &ManagedStateAnalysis::getFunctionState(
     const llvm::Function &function) const {
     return functionStates_.find(&function)->second;
