@@ -92,6 +92,18 @@ The managed entry call itself now runs on a dedicated mutator thread. The main
 thread remains the CLI/bootstrap path, and a separate VM/runtime thread stays
 alive as the future home for safepoint and GC coordination.
 
+The pipeline now also prepares managed functions for LLVM's `statepoint`
+infrastructure by assigning `gc "statepoint-example"`, injecting a
+`gc.safepoint_poll` helper, and running safepoint/statepoint lowering passes.
+
+Before that GC lowering step, MVM now also runs a first managed-state analysis
+pass. It seeds provenance from `__mvm_malloc` and `__mvm_array_malloc`,
+propagates that state through local pointer SSA and direct calls, and annotates
+the resulting function signatures and pointer-producing instructions with
+`!mvm.managed.*` metadata. This is the current bridge between "compiler only
+enforces pointer restrictions" and future address-space based managed-pointer
+rewriting.
+
 Current default entry lookup order:
 
 - `__mvm_main__`
@@ -135,24 +147,30 @@ policy stage that can grow stricter when GC metadata and object rules land.
 Managed-mode memory is now expected to go through MVM-owned symbols:
 
 - `__mvm_malloc(size, alignment)`
-- `__mvm_malloc_array(element_size, element_count, alignment)`
+- `__mvm_array_malloc(element_size, element_count, alignment)`
 - `__mvm_free(ptr)`
-- `__mvm_allocation_size(ptr)`
+- `__mvm_array_free(ptr)`
 - `__mvm_array_length(ptr)`
-- `__mvm_array_element_size(ptr)`
-- `__mvm_bounds_check(ptr, start_index, access_width)`
 
 The current design uses hidden allocation headers for MVM-managed arrays so
 dynamic bounds checks can rely on MVM metadata instead of allocator-specific
 layout details.
 
+At the source-library level, MVM also treats these as different pointer
+surfaces: single-object allocation stays `T*`, while array allocation is
+modeled as `T[*]`.
+
+Array element size is intentionally not queryable at runtime in this ABI.
+Managed code already knows the element type statically, so MVM only keeps the
+metadata needed for bounds checks.
+
 What is implemented now:
 
 - runtime allocation ABI
-- runtime bounds helper for dynamic arrays
 - injected static array bounds checks
 - injected dynamic array bounds checks for GEP-based accesses rooted in
-  `__mvm_malloc_array`
+  `__mvm_array_malloc`
+- root-based managed-state propagation and IR metadata annotation
 - verifier enforcement against raw libc allocators
 
 What is not implemented yet:
@@ -160,6 +178,9 @@ What is not implemented yet:
 - full managed lowering around source-level dynamic array/library surface
 - broader pointer provenance tracking for more complex derived managed-array
   pointer shapes
+- frontend lowering of managed references into LLVM GC-managed pointer address
+  spaces, so current safepoints do not yet carry precise live-root relocation
+  metadata for ordinary `ptr` values
 
 ## Fault Handling Boundary
 
@@ -193,6 +214,7 @@ The smoke samples now use `lona` source directly:
 - [runtime_array_api.lo](examples/runtime_array_api.lo)
 - [runtime_array_oob.lo](examples/runtime_array_oob.lo)
 - [runtime_argv.lo](examples/runtime_argv.lo)
+- [managed_state.lo](examples/managed_state.lo)
 - [runtime_raw_malloc.lo](examples/runtime_raw_malloc.lo)
 
 The remaining raw LLVM IR fixture is:

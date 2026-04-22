@@ -4,21 +4,18 @@ def __mvm_array_malloc(element_size usize, element_count usize, alignment usize)
 #[extern "C"]
 def __mvm_array_free(payload u32[*])
 
-#[extern "C"]
-def __mvm_array_length(payload u32[*]) usize
+def tail(values u32[*]) u32 {
+    ret values(3)
+}
 
 def main() i32 {
     var values = __mvm_array_malloc(sizeof[u32](), 4_usize, 4_usize)
     if values == null {
         ret 10
     }
-    if __mvm_array_length(values) != 4_usize {
-        ret 11
-    }
-    values(0) = 21_u32
     values(3) = 34_u32
-    if values(0) != 21_u32 || values(3) != 34_u32 {
-        ret 12
+    if tail(values) != 34_u32 {
+        ret 11
     }
     __mvm_array_free(values)
     ret 0

@@ -33,6 +33,10 @@ void recordViolation(const llvm::Instruction &instruction,
     });
 }
 
+bool isRuntimeInjectedHelper(const llvm::Function &function) {
+    return function.getName() == "gc.safepoint_poll";
+}
+
 }  // namespace
 
 llvm::Error verifyLLVMModule(const llvm::Module &module, llvm::StringRef stage) {
@@ -62,7 +66,7 @@ llvm::Error ManagedVerifier::verify(const llvm::Module &module,
 
     for (const auto &function : module) {
         if (!function.isDeclaration() && !function.isIntrinsic() &&
-            !function.getSubprogram()) {
+            !function.getSubprogram() && !isRuntimeInjectedHelper(function)) {
             std::string instructionText;
             llvm::raw_string_ostream signature(instructionText);
             function.getFunctionType()->print(signature);
@@ -111,8 +115,9 @@ llvm::Error ManagedVerifier::verify(const llvm::Module &module,
                             recordViolation(
                                 instruction,
                                 "managed code must use the mvm allocation ABI "
-                                "(`__mvm_malloc`, `__mvm_malloc_array`, "
-                                "`__mvm_free`) instead of raw libc allocators",
+                                "(`__mvm_malloc`, `__mvm_array_malloc`, "
+                                "`__mvm_free`, `__mvm_array_free`) instead of "
+                                "raw libc allocators",
                                 violations);
                         }
                     }

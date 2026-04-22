@@ -6,39 +6,29 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 #include <cstdint>
 
 namespace mvm {
 namespace {
 
-constexpr llvm::StringLiteral kDynamicBoundsCheckName = "__mvm_bounds_check";
-constexpr llvm::StringLiteral kStaticBoundsCheckName =
-    "__mvm_bounds_check_static";
-constexpr llvm::StringLiteral kManagedArrayAllocName = "__mvm_malloc_array";
+constexpr llvm::StringLiteral kManagedArrayLengthName = "__mvm_array_length";
+constexpr llvm::StringLiteral kManagedArrayAllocName = "__mvm_array_malloc";
 
 struct StaticCheckPlan {
     llvm::Value *index = nullptr;
     std::uint64_t length = 0;
 };
 
-llvm::FunctionCallee getDynamicBoundsCheck(llvm::Module &module) {
+llvm::FunctionCallee getManagedArrayLength(llvm::Module &module) {
     auto &context = module.getContext();
-    auto *voidTy = llvm::Type::getVoidTy(context);
     auto *ptrTy = llvm::PointerType::get(context, 0);
     auto *i64Ty = llvm::Type::getInt64Ty(context);
-    return module.getOrInsertFunction(kDynamicBoundsCheckName, voidTy, ptrTy, i64Ty,
-                                      i64Ty);
-}
-
-llvm::FunctionCallee getStaticBoundsCheck(llvm::Module &module) {
-    auto &context = module.getContext();
-    auto *voidTy = llvm::Type::getVoidTy(context);
-    auto *i64Ty = llvm::Type::getInt64Ty(context);
-    return module.getOrInsertFunction(kStaticBoundsCheckName, voidTy, i64Ty, i64Ty,
-                                      i64Ty);
+    return module.getOrInsertFunction(kManagedArrayLengthName, i64Ty, ptrTy);
 }
 
 llvm::Value *normalizeIndex(llvm::IRBuilder<> &builder, llvm::Value *index) {
@@ -224,64 +214,71 @@ collectStaticChecks(const llvm::GetElementPtrInst &instruction) {
     return checks;
 }
 
+bool instrumentTrapIfOutOfBounds(llvm::GetElementPtrInst &instruction,
+                                 llvm::Value *outOfBounds) {
+    auto *thenTerminator =
+        llvm::SplitBlockAndInsertIfThen(outOfBounds, &instruction, true);
+    llvm::IRBuilder<> builder(thenTerminator);
+    builder.SetCurrentDebugLocation(instruction.getDebugLoc());
+    auto *trapDecl = llvm::Intrinsic::getDeclaration(
+        instruction.getModule(), llvm::Intrinsic::trap);
+    builder.CreateCall(trapDecl);
+    return true;
+}
+
 bool instrumentGEP(llvm::GetElementPtrInst &instruction, llvm::DominatorTree &domTree,
-                   llvm::FunctionCallee dynamicBoundsCheck,
-                   llvm::FunctionCallee staticBoundsCheck) {
-    bool needsDynamicCheck = false;
+                   llvm::FunctionCallee managedArrayLength) {
+    llvm::Value *outOfBounds = nullptr;
     if (instruction.getNumIndices() != 0) {
-        needsDynamicCheck =
-            isManagedArrayBase(*instruction.getPointerOperand(), domTree);
+        if (isManagedArrayBase(*instruction.getPointerOperand(), domTree)) {
+            llvm::IRBuilder<> builder(&instruction);
+            builder.SetCurrentDebugLocation(instruction.getDebugLoc());
+            auto *dynamicIndex = normalizeIndex(builder, instruction.getOperand(1));
+            if (dynamicIndex) {
+                auto *length = builder.CreateCall(managedArrayLength,
+                                                  {instruction.getPointerOperand()});
+                outOfBounds = builder.CreateICmpUGE(dynamicIndex, length,
+                                                    instruction.getName() +
+                                                        ".mvm.dynamic.oob");
+            }
+        }
     }
 
     auto staticChecks = collectStaticChecks(instruction);
-    bool hasStaticCheck = false;
-    for (const auto &check : staticChecks) {
-        if (!isStaticallyInBounds(*check.index, check.length)) {
-            hasStaticCheck = true;
-            break;
-        }
-    }
-
-    if (!needsDynamicCheck && !hasStaticCheck) {
-        return false;
-    }
-
-    llvm::IRBuilder<> builder(&instruction);
-    builder.SetCurrentDebugLocation(instruction.getDebugLoc());
-
-    if (needsDynamicCheck) {
-        auto *dynamicIndex =
-            normalizeIndex(builder, instruction.getOperand(1));
-        if (dynamicIndex) {
-            builder.CreateCall(dynamicBoundsCheck,
-                               {instruction.getPointerOperand(), dynamicIndex,
-                                builder.getInt64(1)});
-        }
-    }
-
     for (const auto &check : staticChecks) {
         if (isStaticallyInBounds(*check.index, check.length)) {
             continue;
         }
 
+        llvm::IRBuilder<> builder(&instruction);
+        builder.SetCurrentDebugLocation(instruction.getDebugLoc());
         auto *index = normalizeIndex(builder, check.index);
         if (!index) {
             continue;
         }
 
-        builder.CreateCall(staticBoundsCheck,
-                           {index, builder.getInt64(1),
-                            builder.getInt64(check.length)});
+        auto *staticOutOfBounds =
+            builder.CreateICmpUGE(index, builder.getInt64(check.length),
+                                  instruction.getName() + ".mvm.static.oob");
+        if (outOfBounds) {
+            outOfBounds = builder.CreateOr(outOfBounds, staticOutOfBounds,
+                                           instruction.getName() + ".mvm.oob");
+        } else {
+            outOfBounds = staticOutOfBounds;
+        }
     }
 
-    return true;
+    if (!outOfBounds) {
+        return false;
+    }
+
+    return instrumentTrapIfOutOfBounds(instruction, outOfBounds);
 }
 
 }  // namespace
 
 llvm::Error injectBoundsChecks(llvm::Module &module) {
-    auto dynamicBoundsCheck = getDynamicBoundsCheck(module);
-    auto staticBoundsCheck = getStaticBoundsCheck(module);
+    auto managedArrayLength = getManagedArrayLength(module);
 
     bool changed = false;
     for (auto &function : module) {
@@ -300,8 +297,7 @@ llvm::Error injectBoundsChecks(llvm::Module &module) {
         }
 
         for (auto *gep : geps) {
-            changed |=
-                instrumentGEP(*gep, domTree, dynamicBoundsCheck, staticBoundsCheck);
+            changed |= instrumentGEP(*gep, domTree, managedArrayLength);
         }
     }
 

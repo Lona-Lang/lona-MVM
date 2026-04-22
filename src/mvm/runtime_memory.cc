@@ -4,8 +4,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <limits>
+#include <optional>
 
 namespace {
 
@@ -18,8 +18,6 @@ struct AllocationHeader {
     std::uint64_t magic = 0;
     std::uint64_t kind = 0;
     std::uint64_t alignment = 0;
-    std::uint64_t payloadSize = 0;
-    std::uint64_t elementSize = 0;
     std::uint64_t elementCount = 0;
     void *allocationBase = nullptr;
 };
@@ -68,37 +66,8 @@ std::uintptr_t alignUp(std::uintptr_t value, std::size_t alignment) {
     std::_Exit(134);
 }
 
-[[noreturn]] void runtimeAbortBounds(std::size_t index, std::size_t width,
-                                     std::size_t count) {
-    char buffer[256];
-    std::snprintf(buffer, sizeof(buffer),
-                  "array bounds check failed: index=%zu width=%zu length=%zu",
-                  index, width, count);
-    runtimeAbort(buffer);
-}
-
-void checkedBounds(std::uint64_t start_index, std::uint64_t access_width,
-                   std::size_t count, const char *operation) {
-    if (access_width == 0) {
-        return;
-    }
-
-    std::size_t index = 0;
-    std::size_t width = 0;
-    if (!toSize(start_index, index) || !toSize(access_width, width)) {
-        char buffer[160];
-        std::snprintf(buffer, sizeof(buffer),
-                      "%s received an out-of-range index", operation);
-        runtimeAbort(buffer);
-    }
-
-    if (index > count || width > count - index) {
-        runtimeAbortBounds(index, width, count);
-    }
-}
-
 AllocationHeader *checkedHeader(const void *payload, const char *operation,
-                                bool requireArray) {
+                                std::optional<AllocationKind> expectedKind) {
     if (!payload) {
         char buffer[128];
         std::snprintf(buffer, sizeof(buffer),
@@ -116,11 +85,14 @@ AllocationHeader *checkedHeader(const void *payload, const char *operation,
         runtimeAbort(buffer);
     }
 
-    if (requireArray &&
-        header->kind != static_cast<std::uint64_t>(AllocationKind::Array)) {
+    if (expectedKind &&
+        header->kind != static_cast<std::uint64_t>(*expectedKind)) {
         char buffer[128];
-        std::snprintf(buffer, sizeof(buffer),
-                      "%s requires an mvm-managed array allocation", operation);
+        auto expectedName = *expectedKind == AllocationKind::Array
+                                ? "an mvm-managed array allocation"
+                                : "an mvm-managed object allocation";
+        std::snprintf(buffer, sizeof(buffer), "%s requires %s", operation,
+                      expectedName);
         runtimeAbort(buffer);
     }
 
@@ -128,7 +100,7 @@ AllocationHeader *checkedHeader(const void *payload, const char *operation,
 }
 
 void *allocateTracked(AllocationKind kind, std::size_t payloadSize,
-                      std::size_t elementSize, std::size_t elementCount,
+                      std::size_t elementCount,
                       std::size_t alignment) {
     if (alignment == 0) {
         alignment = defaultAlignment();
@@ -168,8 +140,6 @@ void *allocateTracked(AllocationKind kind, std::size_t payloadSize,
     header->magic = kAllocationMagic;
     header->kind = static_cast<std::uint64_t>(kind);
     header->alignment = alignment;
-    header->payloadSize = payloadSize;
-    header->elementSize = elementSize;
     header->elementCount = elementCount;
     header->allocationBase = rawAllocation;
 
@@ -185,11 +155,11 @@ extern "C" void *__mvm_malloc(std::uint64_t size, std::uint64_t alignment) {
         return nullptr;
     }
 
-    return allocateTracked(AllocationKind::Object, payloadSize, payloadSize, 1,
+    return allocateTracked(AllocationKind::Object, payloadSize, 1,
                            requestedAlignment);
 }
 
-extern "C" void *__mvm_malloc_array(std::uint64_t element_size,
+extern "C" void *__mvm_array_malloc(std::uint64_t element_size,
                                     std::uint64_t element_count,
                                     std::uint64_t alignment) {
     std::size_t elementSize = 0;
@@ -209,8 +179,8 @@ extern "C" void *__mvm_malloc_array(std::uint64_t element_size,
         return nullptr;
     }
 
-    return allocateTracked(AllocationKind::Array, payloadSize, elementSize,
-                           elementCount, requestedAlignment);
+    return allocateTracked(AllocationKind::Array, payloadSize, elementCount,
+                           requestedAlignment);
 }
 
 extern "C" void __mvm_free(void *payload) {
@@ -218,41 +188,22 @@ extern "C" void __mvm_free(void *payload) {
         return;
     }
 
-    auto *header = checkedHeader(payload, "__mvm_free", false);
+    auto *header = checkedHeader(payload, "__mvm_free", AllocationKind::Object);
     std::free(header->allocationBase);
 }
 
-extern "C" std::uint64_t __mvm_allocation_size(const void *payload) {
-    auto *header = checkedHeader(payload, "__mvm_allocation_size", false);
-    return header->payloadSize;
+extern "C" void __mvm_array_free(void *payload) {
+    if (!payload) {
+        return;
+    }
+
+    auto *header =
+        checkedHeader(payload, "__mvm_array_free", AllocationKind::Array);
+    std::free(header->allocationBase);
 }
 
 extern "C" std::uint64_t __mvm_array_length(const void *payload) {
-    auto *header = checkedHeader(payload, "__mvm_array_length", true);
+    auto *header =
+        checkedHeader(payload, "__mvm_array_length", AllocationKind::Array);
     return header->elementCount;
-}
-
-extern "C" std::uint64_t __mvm_array_element_size(const void *payload) {
-    auto *header = checkedHeader(payload, "__mvm_array_element_size", true);
-    return header->elementSize;
-}
-
-extern "C" void __mvm_bounds_check(const void *payload,
-                                   std::uint64_t start_index,
-                                   std::uint64_t access_width) {
-    auto *header = checkedHeader(payload, "__mvm_bounds_check", true);
-    checkedBounds(start_index, access_width,
-                  static_cast<std::size_t>(header->elementCount),
-                  "__mvm_bounds_check");
-}
-
-extern "C" void __mvm_bounds_check_static(std::uint64_t start_index,
-                                          std::uint64_t access_width,
-                                          std::uint64_t length) {
-    std::size_t count = 0;
-    if (!toSize(length, count)) {
-        runtimeAbort("__mvm_bounds_check_static received an out-of-range length");
-    }
-
-    checkedBounds(start_index, access_width, count, "__mvm_bounds_check_static");
 }

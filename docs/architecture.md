@@ -162,22 +162,21 @@ points instead of letting user code call arbitrary libc allocators directly.
 Recommended v0 surface:
 
 - `__mvm_malloc(size, alignment)`
-- `__mvm_malloc_array(element_size, element_count, alignment)`
+- `__mvm_array_malloc(element_size, element_count, alignment)`
 - `__mvm_free(ptr)`
-- `__mvm_allocation_size(ptr)`
+- `__mvm_array_free(ptr)`
 - `__mvm_array_length(ptr)`
-- `__mvm_array_element_size(ptr)`
-- `__mvm_bounds_check(ptr, start_index, access_width)`
 
 Design intent:
 
 - single-object allocation and array allocation are distinct ABI paths
+- source-level bindings should reflect that split as `T*` vs `T[*]`
 - dynamic arrays carry hidden metadata owned by MVM
 - managed code receives the payload pointer, not the header pointer
 - runtime metadata layout must not depend on a particular system malloc
   implementation
 
-For dynamic arrays, `__mvm_malloc_array` should allocate:
+For dynamic arrays, `__mvm_array_malloc` should allocate:
 
 ```text
 [hidden mvm header][aligned array payload]
@@ -185,8 +184,6 @@ For dynamic arrays, `__mvm_malloc_array` should allocate:
 
 The hidden header is the source of truth for:
 
-- total payload byte size
-- element size
 - element count
 - allocation kind
 
@@ -201,13 +198,13 @@ The intended lowering split is:
   - inject an IR compare against the compile-time constant bound
 - dynamic arrays
   - inject checks against MVM-owned runtime metadata
-  - either by reading length metadata or by calling `__mvm_bounds_check`
+  - by reading length metadata from `__mvm_array_length`
 
 This repository now implements:
 
 - static array bounds-check injection for aggregate GEPs
 - dynamic array bounds-check injection for GEPs whose base pointer can be proven
-  to come from `__mvm_malloc_array`
+  to come from `__mvm_array_malloc`
 
 The current implementation is intentionally basic. More complex pointer
 provenance and source-level managed lowering can be tightened later.
@@ -278,6 +275,27 @@ The current prototype now follows this topology incrementally:
 - mutator thread performs the managed entry invocation
 - VM/runtime thread stays resident so future safepoint and GC coordination has
   a fixed home
+
+The first GC-facing compiler step should be modeled as "GC-ready IR", not as a
+full collector implementation. In practice that means:
+
+- mark managed functions with an LLVM GC strategy such as `statepoint-example`
+- provide `gc.safepoint_poll`
+- run late safepoint/statepoint rewriting passes
+- postpone precise root relocation until frontend lowering can distinguish
+  managed references from ordinary raw pointers
+
+Between the current raw `ptr` world and that future relocation-aware lowering,
+the runtime can still do a useful intermediate step: root-based managed-state
+analysis. In this model:
+
+- `__mvm_malloc` seeds managed-object provenance
+- `__mvm_array_malloc` seeds managed-array provenance
+- propagation runs over SSA, slot loads/stores, `phi`, `select`, `gep`, direct
+  call arguments, and direct call returns
+- the result is written back as IR metadata so later passes can inspect the
+  inferred managed state without requiring frontend-emitted managed pointer
+  types yet
 
 ## 8. Fault Handling Model
 

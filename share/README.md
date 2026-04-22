@@ -11,6 +11,8 @@ Notes:
 
 - this is a repository-local source library draft
 - it describes the intended managed allocation surface used by MVM
+- it now distinguishes single-object memory pointers from array pointers:
+  `__mvm_malloc` returns `T*`, while `__mvm_array_malloc` returns `T[*]`
 - current bundled `lona` references do not define managed-mode FFI as a stable
   public language contract yet
 - current bundled references also do not document a stable `alignof`-style
