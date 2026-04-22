@@ -95,6 +95,11 @@ alive as the future home for safepoint and GC coordination.
 The pipeline now also prepares managed functions for LLVM's `statepoint`
 infrastructure by assigning `gc "statepoint-example"`, injecting a
 `gc.safepoint_poll` helper, and running safepoint/statepoint lowering passes.
+After that rewrite step, MVM also emits a first GC metadata summary layer:
+`!mvm.gc.module`, `!mvm.gc.function`, `!mvm.gc.statepoint`, and
+`!mvm.gc.relocate`. This is the current bridge between "LLVM has already placed
+safepoints" and "the runtime can start reasoning about concrete GC points and
+root relocation sites".
 
 Before that GC lowering step, MVM now also runs a first managed-state analysis
 pass. It seeds provenance from `__mvm_malloc` and `__mvm_array_malloc`,

@@ -45,10 +45,16 @@ INVALID_RAW_MALLOC_LO := $(ROOT)/examples/runtime_raw_malloc.lo
 INVALID_RAW_MALLOC_BC := $(OUT_DIR)/examples/runtime_raw_malloc.bc
 INVALID_ELEMENT_ADDRESS_LO := $(ROOT)/examples/managed_invalid_element_address.lo
 INVALID_ELEMENT_ADDRESS_STDERR := $(OUT_DIR)/examples/managed_invalid_element_address.stderr
+IR_PIPELINE_DEMO_LO := $(ROOT)/examples/ir_pipeline_demo.lo
+IR_PIPELINE_DEMO_RAW_LL := $(OUT_DIR)/examples/ir_pipeline_demo.before.ll
+IR_PIPELINE_DEMO_BC := $(OUT_DIR)/examples/ir_pipeline_demo.bc
+IR_PIPELINE_DEMO_AFTER_LL := $(OUT_DIR)/examples/ir_pipeline_demo.after.ll
 
-.PHONY: all clean test
+.PHONY: all clean test ir-demo
 
 all: $(TARGET)
+
+ir-demo: $(TARGET) $(IR_PIPELINE_DEMO_RAW_LL) $(IR_PIPELINE_DEMO_AFTER_LL)
 
 test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(EXAMPLE_BC) \
 	$(STATIC_ARRAY_OK_BC) $(STATIC_ARRAY_OOB_BC) $(NO_DEBUG_BC) \
@@ -66,6 +72,7 @@ test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(EXAMPLE_BC) \
 	$(TARGET) -O0 --dump-ir $(MANAGED_DISPATCH_BC) | rg '@leaf\.__mvm\.arg0_raw|@leaf\.__mvm\.arg0_array'
 	$(TARGET) -O0 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg 'declare .*@__mvm_array_length\(ptr addrspace\(1\)\)|declare .*@__mvm_array_free\(ptr addrspace\(1\)\)'
 	$(TARGET) -O0 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg 'ptr addrspace\(1\)|llvm\.experimental\.gc\.relocate\.p1'
+	$(TARGET) -O0 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg '!mvm\.gc\.module = !\{|!mvm\.gc\.function = !\{|!mvm\.gc\.statepoint|!mvm\.gc\.relocate'
 	$(TARGET) $(EXAMPLE_BC)
 	$(TARGET) $(STATIC_ARRAY_OK_BC)
 	$(TARGET) $(RUNTIME_ARRAY_API_BC)
@@ -148,6 +155,18 @@ $(INVALID_ELEMENT_ADDRESS_STDERR): $(INVALID_ELEMENT_ADDRESS_LO) makefile
 	mkdir -p $(dir $@)
 	! $(LONA_IR) --emit mbc --verify-ir -g $< $(OUT_DIR)/examples/managed_invalid_element_address.bc > /dev/null 2> $@
 	grep -q 'managed mode does not allow taking the address of an element from an indexable pointer' $@
+
+$(IR_PIPELINE_DEMO_RAW_LL): $(IR_PIPELINE_DEMO_LO) makefile
+	mkdir -p $(dir $@)
+	$(LONA_IR) --emit ir --verify-ir -g $< $@
+
+$(IR_PIPELINE_DEMO_BC): $(IR_PIPELINE_DEMO_LO) makefile
+	mkdir -p $(dir $@)
+	$(LONA_IR) --emit mbc --verify-ir -g $< $@
+
+$(IR_PIPELINE_DEMO_AFTER_LL): $(IR_PIPELINE_DEMO_BC) $(TARGET)
+	mkdir -p $(dir $@)
+	$(TARGET) -O0 --dump-ir $< > $@
 
 ifneq ($(filter clean,$(MAKECMDGOALS)),clean)
 -include $(MAIN_OBJECT:.o=.d)

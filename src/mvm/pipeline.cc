@@ -8,12 +8,9 @@
 #include "mvm/managed_state.hh"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/LoopAnalysisManager.h"
-#include "llvm/IR/SafepointIRVerifier.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/OptimizationLevel.h"
 #include "llvm/Passes/PassBuilder.h"
-#include "llvm/Transforms/Scalar/PlaceSafepoints.h"
-#include "llvm/Transforms/Scalar/RewriteStatepointsForGC.h"
 
 namespace mvm {
 namespace {
@@ -76,17 +73,9 @@ llvm::Error ModulePipeline::run(llvm::Module &module, int optLevel) const {
         return error;
     }
 
-    if (auto error = prepareManagedGCModule(module)) {
+    if (auto error = runManagedGCPasses(module, moduleAnalysisManager)) {
         return error;
     }
-
-    llvm::ModulePassManager gcPassManager;
-    gcPassManager.addPass(
-        llvm::createModuleToFunctionPassAdaptor(llvm::PlaceSafepointsPass()));
-    gcPassManager.addPass(llvm::RewriteStatepointsForGC());
-    gcPassManager.addPass(llvm::createModuleToFunctionPassAdaptor(
-        llvm::SafepointIRVerifierPass()));
-    gcPassManager.run(module, moduleAnalysisManager);
     return llvm::Error::success();
 }
 

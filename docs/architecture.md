@@ -282,6 +282,8 @@ full collector implementation. In practice that means:
 - mark managed functions with an LLVM GC strategy such as `statepoint-example`
 - provide `gc.safepoint_poll`
 - run late safepoint/statepoint rewriting passes
+- collect a stable MVM-facing summary of the resulting GC points and relocates
+  into `!mvm.gc.*` metadata
 - postpone precise root relocation until frontend lowering can distinguish
   managed references from ordinary raw pointers
 
