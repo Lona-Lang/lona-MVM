@@ -11,7 +11,11 @@ llvm::Expected<int> parseOptLevel(const std::string &value) {
     long parsed = std::strtol(value.c_str(), &end, 10);
     if (!end || *end != '\0' || parsed < 0 || parsed > 3) {
         return makeError("invalid optimization level `" + value +
-                         "`, expected 0-3\n");
+                         "`, expected 1-3\n");
+    }
+    if (parsed == 0) {
+        return makeError("managed mode requires -O1 or higher; -O0 is not "
+                         "supported\n");
     }
     return static_cast<int>(parsed);
 }
@@ -97,7 +101,7 @@ void printUsage(llvm::raw_ostream &out, const char *argv0) {
         << "Options:\n"
         << "  --entry <symbol>  Override the entry symbol\n"
         << "  --dump-ir         Print the verified/optimized module before JIT\n"
-        << "  -O0..-O3          Select the LLVM optimization level\n"
+        << "  -O1..-O3          Select the LLVM optimization level\n"
         << "  -h, --help        Show this help text\n";
 }
 

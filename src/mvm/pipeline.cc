@@ -17,8 +17,6 @@ namespace {
 
 llvm::Expected<llvm::OptimizationLevel> toOptimizationLevel(int optLevel) {
     switch (optLevel) {
-    case 0:
-        return llvm::OptimizationLevel::O0;
     case 1:
         return llvm::OptimizationLevel::O1;
     case 2:
@@ -26,8 +24,12 @@ llvm::Expected<llvm::OptimizationLevel> toOptimizationLevel(int optLevel) {
     case 3:
         return llvm::OptimizationLevel::O3;
     default:
+        if (optLevel == 0) {
+            return makeError("managed mode requires -O1 or higher; -O0 is "
+                             "not supported\n");
+        }
         return makeError("unsupported optimization level `" +
-                         std::to_string(optLevel) + "`\n");
+                         std::to_string(optLevel) + "`, expected 1-3\n");
     }
 }
 
@@ -56,10 +58,8 @@ llvm::Error ModulePipeline::run(llvm::Module &module, int optLevel) const {
     passBuilder.crossRegisterProxies(loopAnalysisManager, functionAnalysisManager,
                                      cgsccAnalysisManager, moduleAnalysisManager);
 
-    if (*levelOrErr != llvm::OptimizationLevel::O0) {
-        auto passManager = passBuilder.buildPerModuleDefaultPipeline(*levelOrErr);
-        passManager.run(module, moduleAnalysisManager);
-    }
+    auto passManager = passBuilder.buildPerModuleDefaultPipeline(*levelOrErr);
+    passManager.run(module, moduleAnalysisManager);
 
     if (auto error = specializeManagedDispatch(module)) {
         return error;

@@ -287,6 +287,12 @@ full collector implementation. In practice that means:
 - postpone precise root relocation until frontend lowering can distinguish
   managed references from ordinary raw pointers
 
+For the current prototype, managed execution should assume an `O1` baseline.
+That keeps the generated code in a shape where LLVM's statepoint/stackmap path
+is practical to consume, and it matches the long-term plan to treat managed
+execution as a tiered runtime rather than an `-O0` debugging mode. `mvm`
+should therefore reject `-O0` for managed payloads and only admit `O1+`.
+
 Between the current raw `ptr` world and that future relocation-aware lowering,
 the runtime can still do a useful intermediate step: root-based managed-state
 analysis. In this model:

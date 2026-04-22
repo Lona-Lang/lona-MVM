@@ -2,11 +2,11 @@ extern void *__mvm_array_malloc(unsigned long element_size,
                                 unsigned long element_count,
                                 unsigned long alignment);
 
-static int leaf(void *slot) {
+__attribute__((noinline)) static int leaf(void *slot) {
     return slot == 0;
 }
 
-static int middle(void *slot) {
+__attribute__((noinline)) static int middle(void *slot) {
     return leaf(slot);
 }
 

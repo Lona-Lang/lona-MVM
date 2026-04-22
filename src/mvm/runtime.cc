@@ -2,6 +2,7 @@
 
 #include "mvm/bitcode.hh"
 #include "mvm/error.hh"
+#include "mvm/gc.hh"
 #include "mvm/jit.hh"
 #include "mvm/pipeline.hh"
 #include "mvm/runtime_threads.hh"
@@ -101,7 +102,13 @@ llvm::Expected<int> runManagedProgram(const Options &options) {
                 entry.symbol.c_str());
 
             runtimeThreads.markMutatorStarted();
+            installGCStackMapRegistry(executor->getStackMaps());
+            registerMutatorThread();
+            clearGCRequest();
+            clearLastRootScanSummary();
             auto exitCodeOrErr = executor->invoke(entry, argv0, args);
+            unregisterMutatorThread();
+            clearGCStackMapRegistry();
             runtimeThreads.markMutatorStopped();
             resultPromise.set_value(std::move(exitCodeOrErr));
         });

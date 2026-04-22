@@ -1,0 +1,38 @@
+#[extern "C"]
+def __mvm_array_malloc(element_size usize, element_count usize, alignment usize) u32[*]
+
+#[extern "C"]
+def __mvm_array_free(payload u32[*])
+
+#[extern "C"]
+def __mvm_request_gc()
+
+def spin(values u32[*]) i32 {
+    var i = 0_u32
+    __mvm_request_gc()
+
+    for i < 4_u32 {
+        i = i + 1_u32
+    }
+
+    values(0) = i
+
+    if values(0) != 4_u32 {
+        ret 11
+    }
+
+    ret 0
+}
+
+def main() i32 {
+    var values = __mvm_array_malloc(sizeof[u32](), 4_usize, 4_usize)
+    if values == null {
+        ret 10
+    }
+
+    var status = spin(values)
+    __mvm_array_free(values)
+    ret status
+}
+
+ret main()

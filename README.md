@@ -109,6 +109,10 @@ the resulting function signatures and pointer-producing instructions with
 enforces pointer restrictions" and future address-space based managed-pointer
 rewriting.
 
+Managed execution now treats `O1` as the minimum supported optimization level.
+`mvm` rejects `-O0` explicitly, and the managed GC/root-scan path is exercised
+only on `O1+` code shapes.
+
 Current default entry lookup order:
 
 - `__mvm_main__`
@@ -210,6 +214,8 @@ Run the bundled smoke coverage:
 ```bash
 make test
 ```
+
+For managed payloads, `mvm` accepts `-O1`, `-O2`, and `-O3`. `-O0` is rejected.
 
 The smoke samples now use `lona` source directly:
 

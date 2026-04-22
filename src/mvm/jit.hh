@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mvm/gc.hh"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -30,9 +31,12 @@ public:
     static llvm::Expected<std::unique_ptr<JitExecutor>> create();
 
     explicit JitExecutor(std::unique_ptr<llvm::orc::LLJIT> jit);
+    JitExecutor(std::unique_ptr<llvm::orc::LLJIT> jit,
+                std::shared_ptr<GCStackMapRegistry> stackMaps);
 
     const llvm::DataLayout &getDataLayout() const;
     const llvm::Triple &getTargetTriple() const;
+    const std::shared_ptr<GCStackMapRegistry> &getStackMaps() const;
 
     llvm::Error addModule(std::unique_ptr<llvm::Module> module,
                           std::unique_ptr<llvm::LLVMContext> context);
@@ -41,6 +45,7 @@ public:
 
 private:
     std::unique_ptr<llvm::orc::LLJIT> jit_;
+    std::shared_ptr<GCStackMapRegistry> stackMaps_;
 };
 
 }  // namespace mvm

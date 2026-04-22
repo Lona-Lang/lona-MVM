@@ -9,7 +9,7 @@ EXPORT_DYNAMIC_FLAGS := -rdynamic
 
 BASE_CXXFLAGS := $(shell $(LLVM_CONFIG) --cxxflags)
 LLVM_LD_FLAGS := $(shell $(LLVM_CONFIG) --ldflags --system-libs --libs core orcjit native passes support bitreader executionengine nativecodegen)
-CXXFLAGS := $(BASE_CXXFLAGS) -std=c++20 -g -Wall
+CXXFLAGS := $(BASE_CXXFLAGS) -std=c++20 -g -Wall -fno-omit-frame-pointer
 INCLUDE_PATHS := -I$(ROOT)/src
 
 SOURCE_FILES := $(shell find $(ROOT)/src -name "*.cc" | sort)
@@ -22,6 +22,9 @@ RUNTIME_MEMORY_TEST_SOURCE := $(ROOT)/tests/runtime_memory_test.cc
 RUNTIME_MEMORY_TEST_OBJECT := $(patsubst %.cc,$(OUT_DIR)/%.o,$(RUNTIME_MEMORY_TEST_SOURCE))
 RUNTIME_MEMORY_OBJECT := $(OUT_DIR)/src/mvm/runtime_memory.o
 RUNTIME_MEMORY_TEST_TARGET := $(OUT_DIR)/runtime_memory_test
+GC_ROOT_SCAN_TEST_SOURCE := $(ROOT)/tests/gc_root_scan_test.cc
+GC_ROOT_SCAN_TEST_OBJECT := $(patsubst %.cc,$(OUT_DIR)/%.o,$(GC_ROOT_SCAN_TEST_SOURCE))
+GC_ROOT_SCAN_TEST_TARGET := $(OUT_DIR)/gc_root_scan_test
 EXAMPLE_LO := $(ROOT)/examples/hello.lo
 EXAMPLE_BC := $(OUT_DIR)/examples/hello.bc
 STATIC_ARRAY_OK_LO := $(ROOT)/examples/static_array_ok.lo
@@ -49,6 +52,8 @@ IR_PIPELINE_DEMO_LO := $(ROOT)/examples/ir_pipeline_demo.lo
 IR_PIPELINE_DEMO_RAW_LL := $(OUT_DIR)/examples/ir_pipeline_demo.before.ll
 IR_PIPELINE_DEMO_BC := $(OUT_DIR)/examples/ir_pipeline_demo.bc
 IR_PIPELINE_DEMO_AFTER_LL := $(OUT_DIR)/examples/ir_pipeline_demo.after.ll
+GC_ROOT_SCAN_LO := $(ROOT)/examples/gc_root_scan.lo
+GC_ROOT_SCAN_BC := $(OUT_DIR)/examples/gc_root_scan.bc
 
 .PHONY: all clean test ir-demo
 
@@ -56,23 +61,22 @@ all: $(TARGET)
 
 ir-demo: $(TARGET) $(IR_PIPELINE_DEMO_RAW_LL) $(IR_PIPELINE_DEMO_AFTER_LL)
 
-test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(EXAMPLE_BC) \
+test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(GC_ROOT_SCAN_TEST_TARGET) $(EXAMPLE_BC) \
 	$(STATIC_ARRAY_OK_BC) $(STATIC_ARRAY_OOB_BC) $(NO_DEBUG_BC) \
 	$(INVALID_BC) $(RUNTIME_ARRAY_API_BC) $(RUNTIME_ARRAY_API_MBC) \
-	$(RUNTIME_ARRAY_OOB_BC) \
+	$(RUNTIME_ARRAY_OOB_BC) $(GC_ROOT_SCAN_BC) \
 	$(RUNTIME_ARGV_BC) $(MANAGED_STATE_BC) $(MANAGED_DISPATCH_BC) \
 	$(INVALID_RAW_MALLOC_BC) $(INVALID_ELEMENT_ADDRESS_STDERR)
 	$(RUNTIME_MEMORY_TEST_TARGET)
+	$(GC_ROOT_SCAN_TEST_TARGET) $(GC_ROOT_SCAN_BC)
 	$(TARGET) --dump-ir $(EXAMPLE_BC) | rg 'llvm\.experimental\.gc\.statepoint|gc "statepoint-example"'
-	$(TARGET) -O0 --dump-ir $(MANAGED_STATE_BC) | rg 'mvm\.managed\.signature|arg0=array'
-	$(TARGET) -O0 --dump-ir $(MANAGED_STATE_BC) | rg 'ptr addrspace\(1\)|llvm\.experimental\.gc\.relocate\.p1'
-	$(TARGET) -O0 --dump-ir $(MANAGED_DISPATCH_BC) | rg 'define internal i32 @middle\.__mvm\.arg0_raw|define internal i32 @middle\.__mvm\.arg0_array'
-	$(TARGET) -O0 --dump-ir $(MANAGED_DISPATCH_BC) | rg 'define internal i32 @leaf\.__mvm\.arg0_raw|define internal i32 @leaf\.__mvm\.arg0_array'
-	$(TARGET) -O0 --dump-ir $(MANAGED_DISPATCH_BC) | rg '@middle\.__mvm\.arg0_raw|@middle\.__mvm\.arg0_array'
-	$(TARGET) -O0 --dump-ir $(MANAGED_DISPATCH_BC) | rg '@leaf\.__mvm\.arg0_raw|@leaf\.__mvm\.arg0_array'
-	$(TARGET) -O0 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg 'declare .*@__mvm_array_length\(ptr addrspace\(1\)\)|declare .*@__mvm_array_free\(ptr addrspace\(1\)\)'
-	$(TARGET) -O0 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg 'ptr addrspace\(1\)|llvm\.experimental\.gc\.relocate\.p1'
-	$(TARGET) -O0 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg '!mvm\.gc\.module = !\{|!mvm\.gc\.function = !\{|!mvm\.gc\.statepoint|!mvm\.gc\.relocate'
+	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'mvm\.managed\.signature|arg0=array'
+	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'ptr addrspace\(1\)|llvm\.experimental\.gc\.relocate\.p1'
+	$(TARGET) -O1 --dump-ir $(MANAGED_DISPATCH_BC) | rg '@middle\.__mvm\.arg0_raw|@middle\.__mvm\.arg0_array'
+	$(TARGET) -O1 --dump-ir $(MANAGED_DISPATCH_BC) | rg '@leaf\.__mvm\.arg0_raw|@leaf\.__mvm\.arg0_array'
+	$(TARGET) -O1 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg 'declare .*@__mvm_array_length\(ptr addrspace\(1\)\)|declare .*@__mvm_array_free\(ptr addrspace\(1\)\)'
+	$(TARGET) -O1 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg 'ptr addrspace\(1\)|llvm\.experimental\.gc\.relocate\.p1'
+	$(TARGET) -O1 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg '!mvm\.gc\.module = !\{|!mvm\.gc\.function = !\{|!mvm\.gc\.statepoint|!mvm\.gc\.relocate'
 	$(TARGET) $(EXAMPLE_BC)
 	$(TARGET) $(STATIC_ARRAY_OK_BC)
 	$(TARGET) $(RUNTIME_ARRAY_API_BC)
@@ -80,6 +84,8 @@ test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(EXAMPLE_BC) \
 	$(TARGET) $(MANAGED_STATE_BC)
 	$(TARGET) $(MANAGED_DISPATCH_BC)
 	$(TARGET) $(RUNTIME_ARGV_BC) -- foo
+	! $(TARGET) -O0 $(EXAMPLE_BC) > /dev/null 2> $(OUT_DIR)/examples/reject_o0.stderr
+	grep -q 'managed mode requires -O1 or higher; -O0 is not supported' $(OUT_DIR)/examples/reject_o0.stderr
 	! $(TARGET) $(STATIC_ARRAY_OOB_BC)
 	! $(TARGET) $(NO_DEBUG_BC)
 	! $(TARGET) $(INVALID_BC)
@@ -94,6 +100,11 @@ $(TARGET): $(MAIN_OBJECT) $(LIBRARY_OBJECTS)
 $(RUNTIME_MEMORY_TEST_TARGET): $(RUNTIME_MEMORY_OBJECT) $(RUNTIME_MEMORY_TEST_OBJECT)
 	mkdir -p $(dir $@)
 	$(CXX) $^ $(CXXFLAGS) $(INCLUDE_PATHS) -o $@
+
+$(GC_ROOT_SCAN_TEST_TARGET): $(LIBRARY_OBJECTS) $(GC_ROOT_SCAN_TEST_OBJECT)
+	mkdir -p $(dir $@)
+	$(CXX) $^ $(CXXFLAGS) $(INCLUDE_PATHS) $(LLVM_LD_FLAGS) \
+		$(EXPORT_DYNAMIC_FLAGS) -o $@
 
 $(OUT_DIR)/%.d: %.cc makefile
 	mkdir -p $(dir $@)
@@ -145,7 +156,7 @@ $(MANAGED_STATE_BC): $(MANAGED_STATE_LO) makefile
 
 $(MANAGED_DISPATCH_BC): $(MANAGED_DISPATCH_C) makefile
 	mkdir -p $(dir $@)
-	$(CLANG) -g -O0 -Xclang -disable-O0-optnone -emit-llvm -c $< -o $@
+	$(CLANG) -g -O1 -emit-llvm -c $< -o $@
 
 $(INVALID_RAW_MALLOC_BC): $(INVALID_RAW_MALLOC_LO) makefile
 	mkdir -p $(dir $@)
@@ -164,14 +175,19 @@ $(IR_PIPELINE_DEMO_BC): $(IR_PIPELINE_DEMO_LO) makefile
 	mkdir -p $(dir $@)
 	$(LONA_IR) --emit mbc --verify-ir -g $< $@
 
+$(GC_ROOT_SCAN_BC): $(GC_ROOT_SCAN_LO) makefile
+	mkdir -p $(dir $@)
+	$(LONA_IR) --emit mbc --verify-ir -g $< $@
+
 $(IR_PIPELINE_DEMO_AFTER_LL): $(IR_PIPELINE_DEMO_BC) $(TARGET)
 	mkdir -p $(dir $@)
-	$(TARGET) -O0 --dump-ir $< > $@
+	$(TARGET) -O1 --dump-ir $< > $@
 
 ifneq ($(filter clean,$(MAKECMDGOALS)),clean)
 -include $(MAIN_OBJECT:.o=.d)
 -include $(LIBRARY_OBJECTS:.o=.d)
 -include $(RUNTIME_MEMORY_TEST_OBJECT:.o=.d)
+-include $(GC_ROOT_SCAN_TEST_OBJECT:.o=.d)
 endif
 
 clean:

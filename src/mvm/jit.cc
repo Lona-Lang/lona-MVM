@@ -1,6 +1,8 @@
 #include "mvm/jit.hh"
 
 #include "mvm/error.hh"
+#include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
+#include "llvm/ExecutionEngine/SectionMemoryManager.h"
 #include "llvm/ExecutionEngine/Orc/ExecutionUtils.h"
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -88,13 +90,37 @@ llvm::Expected<std::unique_ptr<JitExecutor>> JitExecutor::create() {
         return makeError("failed to initialize the native asm parser\n");
     }
 
-    auto jitOrErr = llvm::orc::LLJITBuilder().create();
+    auto stackMaps = createGCStackMapRegistry();
+
+    llvm::orc::LLJITBuilder jitBuilder;
+    jitBuilder.setObjectLinkingLayerCreator(
+        [stackMaps](llvm::orc::ExecutionSession &session,
+                    const llvm::Triple &) -> llvm::Expected<
+                        std::unique_ptr<llvm::orc::ObjectLayer>> {
+            auto layer = std::make_unique<llvm::orc::RTDyldObjectLinkingLayer>(
+                session, []() {
+                    return std::make_unique<llvm::SectionMemoryManager>();
+                });
+            layer->setProcessAllSections(true);
+            layer->setNotifyLoaded(
+                [stackMaps](llvm::orc::MaterializationResponsibility &,
+                            const llvm::object::ObjectFile &objectFile,
+                            const llvm::RuntimeDyld::LoadedObjectInfo &loadedInfo) {
+                    if (auto error =
+                            stackMaps->registerObject(objectFile, loadedInfo)) {
+                        stackMaps->recordRegistrationError(std::move(error));
+                    }
+                });
+            return std::unique_ptr<llvm::orc::ObjectLayer>(std::move(layer));
+        });
+
+    auto jitOrErr = jitBuilder.create();
     if (!jitOrErr) {
         return jitOrErr.takeError();
     }
 
     auto executor = std::unique_ptr<JitExecutor>(
-        new JitExecutor(std::move(*jitOrErr)));
+        new JitExecutor(std::move(*jitOrErr), std::move(stackMaps)));
 
     auto generatorOrErr =
         llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
@@ -109,12 +135,20 @@ llvm::Expected<std::unique_ptr<JitExecutor>> JitExecutor::create() {
 JitExecutor::JitExecutor(std::unique_ptr<llvm::orc::LLJIT> jit)
     : jit_(std::move(jit)) {}
 
+JitExecutor::JitExecutor(std::unique_ptr<llvm::orc::LLJIT> jit,
+                         std::shared_ptr<GCStackMapRegistry> stackMaps)
+    : jit_(std::move(jit)), stackMaps_(std::move(stackMaps)) {}
+
 const llvm::DataLayout &JitExecutor::getDataLayout() const {
     return jit_->getDataLayout();
 }
 
 const llvm::Triple &JitExecutor::getTargetTriple() const {
     return jit_->getTargetTriple();
+}
+
+const std::shared_ptr<GCStackMapRegistry> &JitExecutor::getStackMaps() const {
+    return stackMaps_;
 }
 
 llvm::Error JitExecutor::addModule(std::unique_ptr<llvm::Module> module,
@@ -129,6 +163,12 @@ llvm::Expected<int> JitExecutor::invoke(const EntryPoint &entry,
     auto addressOrErr = jit_->lookup(entry.symbol);
     if (!addressOrErr) {
         return addressOrErr.takeError();
+    }
+
+    if (stackMaps_) {
+        if (auto error = stackMaps_->takeRegistrationError()) {
+            return std::move(error);
+        }
     }
 
     std::vector<std::string> ownedArgs;
