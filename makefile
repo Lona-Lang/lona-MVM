@@ -38,6 +38,8 @@ RUNTIME_ARGV_LO := $(ROOT)/examples/runtime_argv.lo
 RUNTIME_ARGV_BC := $(OUT_DIR)/examples/runtime_argv.bc
 MANAGED_STATE_LO := $(ROOT)/examples/managed_state.lo
 MANAGED_STATE_BC := $(OUT_DIR)/examples/managed_state.bc
+MANAGED_DISPATCH_C := $(ROOT)/examples/managed_dispatch.c
+MANAGED_DISPATCH_BC := $(OUT_DIR)/examples/managed_dispatch.bc
 INVALID_RAW_MALLOC_LO := $(ROOT)/examples/runtime_raw_malloc.lo
 INVALID_RAW_MALLOC_BC := $(OUT_DIR)/examples/runtime_raw_malloc.bc
 
@@ -48,15 +50,20 @@ all: $(TARGET)
 test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(EXAMPLE_BC) \
 	$(STATIC_ARRAY_OK_BC) $(STATIC_ARRAY_OOB_BC) $(NO_DEBUG_BC) \
 	$(INVALID_BC) $(RUNTIME_ARRAY_API_BC) $(RUNTIME_ARRAY_OOB_BC) \
-	$(RUNTIME_ARGV_BC) $(MANAGED_STATE_BC) \
+	$(RUNTIME_ARGV_BC) $(MANAGED_STATE_BC) $(MANAGED_DISPATCH_BC) \
 	$(INVALID_RAW_MALLOC_BC)
 	$(RUNTIME_MEMORY_TEST_TARGET)
 	$(TARGET) --dump-ir $(EXAMPLE_BC) | rg 'llvm\.experimental\.gc\.statepoint|gc "statepoint-example"'
 	$(TARGET) -O0 --dump-ir $(MANAGED_STATE_BC) | rg 'mvm\.managed\.signature|arg0=array'
+	$(TARGET) -O0 --dump-ir $(MANAGED_DISPATCH_BC) | rg 'define internal i32 @middle\.__mvm\.arg0_raw|define internal i32 @middle\.__mvm\.arg0_array'
+	$(TARGET) -O0 --dump-ir $(MANAGED_DISPATCH_BC) | rg 'define internal i32 @leaf\.__mvm\.arg0_raw|define internal i32 @leaf\.__mvm\.arg0_array'
+	$(TARGET) -O0 --dump-ir $(MANAGED_DISPATCH_BC) | rg '@middle\.__mvm\.arg0_raw|@middle\.__mvm\.arg0_array'
+	$(TARGET) -O0 --dump-ir $(MANAGED_DISPATCH_BC) | rg '@leaf\.__mvm\.arg0_raw|@leaf\.__mvm\.arg0_array'
 	$(TARGET) $(EXAMPLE_BC)
 	$(TARGET) $(STATIC_ARRAY_OK_BC)
 	$(TARGET) $(RUNTIME_ARRAY_API_BC)
 	$(TARGET) $(MANAGED_STATE_BC)
+	$(TARGET) $(MANAGED_DISPATCH_BC)
 	$(TARGET) $(RUNTIME_ARGV_BC) -- foo
 	! $(TARGET) $(STATIC_ARRAY_OOB_BC)
 	! $(TARGET) $(NO_DEBUG_BC)
@@ -116,6 +123,10 @@ $(RUNTIME_ARGV_BC): $(RUNTIME_ARGV_LO) makefile
 $(MANAGED_STATE_BC): $(MANAGED_STATE_LO) makefile
 	mkdir -p $(dir $@)
 	$(LONA_IR) --emit linked-bc --verify-ir -g $< $@
+
+$(MANAGED_DISPATCH_BC): $(MANAGED_DISPATCH_C) makefile
+	mkdir -p $(dir $@)
+	$(CLANG) -g -O0 -Xclang -disable-O0-optnone -emit-llvm -c $< -o $@
 
 $(INVALID_RAW_MALLOC_BC): $(INVALID_RAW_MALLOC_LO) makefile
 	mkdir -p $(dir $@)

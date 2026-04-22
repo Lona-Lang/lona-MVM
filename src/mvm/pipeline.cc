@@ -3,6 +3,7 @@
 #include "mvm/bounds_instrumentation.hh"
 #include "mvm/error.hh"
 #include "mvm/gc.hh"
+#include "mvm/managed_dispatch.hh"
 #include "mvm/managed_state.hh"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/LoopAnalysisManager.h"
@@ -60,6 +61,10 @@ llvm::Error ModulePipeline::run(llvm::Module &module, int optLevel) const {
     if (*levelOrErr != llvm::OptimizationLevel::O0) {
         auto passManager = passBuilder.buildPerModuleDefaultPipeline(*levelOrErr);
         passManager.run(module, moduleAnalysisManager);
+    }
+
+    if (auto error = specializeManagedDispatch(module)) {
+        return error;
     }
 
     if (auto error = annotateManagedState(module)) {
