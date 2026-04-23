@@ -45,6 +45,7 @@ public:
 
     llvm::Error run();
     PointerState getValueState(const llvm::Value &value) const;
+    PointerState getLocationState(const llvm::Value &value) const;
     PointerState getSlotState(const llvm::Value &slot) const;
     const FunctionState &getFunctionState(const llvm::Function &function) const;
     void attachMetadata();
@@ -55,17 +56,21 @@ private:
     bool visitCall(llvm::CallBase &call);
     PointerState getCallResultState(const llvm::Function &callee) const;
     bool updateValueState(llvm::Value &value, PointerState state);
+    bool updateLocationState(llvm::Value &value, PointerState state);
+    bool updatePointerSourceState(llvm::Value &value, PointerState state);
     bool updateSlotState(llvm::Value &slot, PointerState state);
     bool updateParamState(llvm::Argument &argument, PointerState state);
     bool updateReturnState(llvm::Function &function, PointerState state);
     llvm::Function *getDirectCallee(llvm::CallBase &call) const;
     llvm::Value *getTrackedSlot(llvm::Value &pointerOperand) const;
+    PointerState getAggregateFieldState(llvm::Value &pointerOperand) const;
     std::string renderState(PointerState state) const;
     llvm::MDNode *createStateNode(PointerState state) const;
     void attachFunctionMetadata(llvm::Function &function);
 
     llvm::Module &module_;
     llvm::DenseMap<const llvm::Value *, PointerState> valueStates_;
+    llvm::DenseMap<const llvm::Value *, PointerState> locationStates_;
     llvm::DenseMap<const llvm::Value *, PointerState> slotStates_;
     llvm::DenseMap<const llvm::Function *, FunctionState> functionStates_;
 };

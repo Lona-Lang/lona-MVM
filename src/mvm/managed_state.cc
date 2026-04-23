@@ -30,6 +30,11 @@ enum PointerStateBits : std::uint8_t {
     kStateManagedArray = 1u << 3,
 };
 
+bool isConcreteManagedKind(ManagedPointerKind kind) {
+    return kind == ManagedPointerKind::Object ||
+           kind == ManagedPointerKind::Array;
+}
+
 }  // namespace
 
 bool PointerState::empty() const { return bits == kStateUnknown; }
@@ -117,6 +122,27 @@ PointerState ManagedStateAnalysis::getValueState(const llvm::Value &value) const
     return stateIt->second;
 }
 
+PointerState ManagedStateAnalysis::getLocationState(const llvm::Value &value) const {
+    if (!value.getType()->isPointerTy()) {
+        return {};
+    }
+
+    if (auto *slot = getTrackedSlot(const_cast<llvm::Value &>(value))) {
+        return getSlotState(*slot);
+    }
+
+    auto stateIt = locationStates_.find(&value);
+    if (stateIt != locationStates_.end()) {
+        return stateIt->second;
+    }
+
+    auto valueState = getValueState(value);
+    if (valueState.hasManaged()) {
+        return valueState;
+    }
+    return {};
+}
+
 PointerState ManagedStateAnalysis::getSlotState(const llvm::Value &slot) const {
     auto stateIt = slotStates_.find(&slot);
     if (stateIt == slotStates_.end()) {
@@ -158,7 +184,11 @@ bool ManagedStateAnalysis::visitInstruction(llvm::Instruction &instruction) {
     }
 
     if (auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&instruction)) {
-        return updateValueState(*gep, getValueState(*gep->getPointerOperand()));
+        auto changed = updateValueState(*gep, getValueState(*gep->getPointerOperand()));
+        if (gep->getResultElementType()->isPointerTy()) {
+            changed |= updateLocationState(*gep, getAggregateFieldState(*gep));
+        }
+        return changed;
     }
 
     if (auto *phi = llvm::dyn_cast<llvm::PHINode>(&instruction)) {
@@ -166,17 +196,33 @@ bool ManagedStateAnalysis::visitInstruction(llvm::Instruction &instruction) {
         for (llvm::Value *incoming : phi->incoming_values()) {
             state.merge(getValueState(*incoming));
         }
-        return updateValueState(*phi, state);
+        bool changed = updateValueState(*phi, state);
+
+        PointerState locationState;
+        for (llvm::Value *incoming : phi->incoming_values()) {
+            locationState.merge(getLocationState(*incoming));
+        }
+        changed |= updateLocationState(*phi, locationState);
+        return changed;
     }
 
     if (auto *select = llvm::dyn_cast<llvm::SelectInst>(&instruction)) {
         PointerState state = getValueState(*select->getTrueValue());
         state.merge(getValueState(*select->getFalseValue()));
-        return updateValueState(*select, state);
+        bool changed = updateValueState(*select, state);
+
+        PointerState locationState = getLocationState(*select->getTrueValue());
+        locationState.merge(getLocationState(*select->getFalseValue()));
+        changed |= updateLocationState(*select, locationState);
+        return changed;
     }
 
     if (auto *freeze = llvm::dyn_cast<llvm::FreezeInst>(&instruction)) {
-        return updateValueState(*freeze, getValueState(*freeze->getOperand(0)));
+        auto changed =
+            updateValueState(*freeze, getValueState(*freeze->getOperand(0)));
+        changed |=
+            updateLocationState(*freeze, getLocationState(*freeze->getOperand(0)));
+        return changed;
     }
 
     if (auto *load = llvm::dyn_cast<llvm::LoadInst>(&instruction)) {
@@ -184,10 +230,7 @@ bool ManagedStateAnalysis::visitInstruction(llvm::Instruction &instruction) {
             return false;
         }
 
-        if (auto *slot = getTrackedSlot(*load->getPointerOperand())) {
-            return updateValueState(*load, slotStates_[slot]);
-        }
-        return false;
+        return updateValueState(*load, getLocationState(*load->getPointerOperand()));
     }
 
     if (auto *store = llvm::dyn_cast<llvm::StoreInst>(&instruction)) {
@@ -195,10 +238,18 @@ bool ManagedStateAnalysis::visitInstruction(llvm::Instruction &instruction) {
             return false;
         }
 
+        bool changed = false;
+        auto valueState = getValueState(*store->getValueOperand());
         if (auto *slot = getTrackedSlot(*store->getPointerOperand())) {
-            return updateSlotState(*slot, getValueState(*store->getValueOperand()));
+            changed |= updateSlotState(*slot, valueState);
         }
-        return false;
+        changed |= updateLocationState(*store->getPointerOperand(), valueState);
+        auto locationState = getLocationState(*store->getPointerOperand());
+        if (locationState.hasManaged()) {
+            changed |= updatePointerSourceState(*store->getValueOperand(),
+                                                locationState);
+        }
+        return changed;
     }
 
     if (auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
@@ -275,6 +326,26 @@ bool ManagedStateAnalysis::updateValueState(llvm::Value &value, PointerState sta
     return valueStates_[&value].merge(state);
 }
 
+bool ManagedStateAnalysis::updateLocationState(llvm::Value &value,
+                                               PointerState state) {
+    if (!value.getType()->isPointerTy() || state.empty()) {
+        return false;
+    }
+    return locationStates_[&value].merge(state);
+}
+
+bool ManagedStateAnalysis::updatePointerSourceState(llvm::Value &value,
+                                                    PointerState state) {
+    if (!value.getType()->isPointerTy() || state.empty()) {
+        return false;
+    }
+
+    if (auto *argument = llvm::dyn_cast<llvm::Argument>(&value)) {
+        return updateParamState(*argument, state);
+    }
+    return updateValueState(value, state);
+}
+
 bool ManagedStateAnalysis::updateSlotState(llvm::Value &slot, PointerState state) {
     if (state.empty()) {
         return false;
@@ -322,6 +393,22 @@ llvm::Value *ManagedStateAnalysis::getTrackedSlot(
     }
 
     return nullptr;
+}
+
+PointerState ManagedStateAnalysis::getAggregateFieldState(
+    llvm::Value &pointerOperand) const {
+    auto *location = pointerOperand.stripPointerCasts();
+    auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(location);
+    if (!gep) {
+        return {};
+    }
+
+    auto baseState = getValueState(*gep->getPointerOperand());
+    if (!isConcreteManagedKind(baseState.dispatchKind())) {
+        return {};
+    }
+
+    return baseState;
 }
 
 std::string ManagedStateAnalysis::renderState(PointerState state) const {

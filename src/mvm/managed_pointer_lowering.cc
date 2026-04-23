@@ -4,9 +4,11 @@
 #include "mvm/managed_state.hh"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/InstrTypes.h"
@@ -14,6 +16,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include <string>
 #include <utility>
@@ -35,6 +38,51 @@ bool isConcreteManagedKind(ManagedPointerKind kind) {
            kind == ManagedPointerKind::Array;
 }
 
+std::string renderPointerState(PointerState state) {
+    if (state.empty()) {
+        return "unknown";
+    }
+
+    llvm::SmallVector<const char *, 4> parts;
+    if (state.hasRaw()) {
+        parts.push_back("raw");
+    }
+    if (state.hasManagedObject()) {
+        parts.push_back("object");
+    }
+    if (state.hasManagedArray()) {
+        parts.push_back("array");
+    }
+    if (state.hasNull()) {
+        parts.push_back("null");
+    }
+
+    std::string text;
+    for (auto *part : parts) {
+        if (!text.empty()) {
+            text += '|';
+        }
+        text += part;
+    }
+    return text;
+}
+
+std::string renderValue(const llvm::Value &value) {
+    std::string text;
+    llvm::raw_string_ostream out(text);
+    value.print(out);
+    out.flush();
+    return text;
+}
+
+std::string renderType(const llvm::Type &type) {
+    std::string text;
+    llvm::raw_string_ostream out(text);
+    type.print(out);
+    out.flush();
+    return text;
+}
+
 bool isManagedRuntimeDeclaration(const llvm::Function &function) {
     auto name = function.getName();
     return name == kManagedObjectAllocName || name == kManagedArrayAllocName ||
@@ -44,6 +92,23 @@ bool isManagedRuntimeDeclaration(const llvm::Function &function) {
 
 llvm::PointerType *managedPointerType(llvm::LLVMContext &context) {
     return llvm::PointerType::get(context, kManagedAddressSpace);
+}
+
+void collectDominancePreorder(
+    llvm::DomTreeNode *node, llvm::SmallVectorImpl<llvm::BasicBlock *> &order,
+    llvm::SmallPtrSetImpl<llvm::BasicBlock *> &scheduled) {
+    if (!node) {
+        return;
+    }
+
+    auto *block = node->getBlock();
+    if (block && scheduled.insert(block).second) {
+        order.push_back(block);
+    }
+
+    for (auto *child : *node) {
+        collectDominancePreorder(child, order, scheduled);
+    }
 }
 
 class ManagedPointerLowerer {
@@ -336,7 +401,7 @@ private:
                                              llvm::Value::InstructionVal
                                          ? "instruction"
                                          : "value") +
-                         "`\n");
+                         "`:\n  " + renderValue(value) + "\n");
     }
 
     llvm::Expected<llvm::Instruction *> cloneGenericInstruction(
@@ -445,10 +510,17 @@ private:
                     expectedValueType = managedPointerType(module_.getContext());
                 }
             } else {
-                auto valueKind =
-                    analysis_.getValueState(*store.getValueOperand()).dispatchKind();
-                if (isConcreteManagedKind(valueKind)) {
+                auto locationKind =
+                    analysis_.getLocationState(*store.getPointerOperand())
+                        .dispatchKind();
+                if (isConcreteManagedKind(locationKind)) {
                     expectedValueType = managedPointerType(module_.getContext());
+                } else {
+                    auto valueKind =
+                        analysis_.getValueState(*store.getValueOperand()).dispatchKind();
+                    if (isConcreteManagedKind(valueKind)) {
+                        expectedValueType = managedPointerType(module_.getContext());
+                    }
                 }
             }
         }
@@ -456,6 +528,27 @@ private:
         auto valueOrErr = mapValue(*store.getValueOperand(), expectedValueType);
         if (!valueOrErr) {
             return valueOrErr.takeError();
+        }
+        if ((*valueOrErr)->getType() != expectedValueType) {
+            return makeError("managed pointer lowering could not rewrite store "
+                             "value for function `" +
+                             store.getFunction()->getName().str() + "`\n"
+                             "  store: " +
+                             renderValue(store) + "\n"
+                             "  expected type: " +
+                             renderType(*expectedValueType) + "\n"
+                             "  actual type: " +
+                             renderType(*(*valueOrErr)->getType()) + "\n"
+                             "  value state: " +
+                             renderPointerState(
+                                 analysis_.getValueState(*store.getValueOperand())) +
+                             "\n"
+                             "  location state: " +
+                             renderPointerState(
+                                 analysis_.getLocationState(*store.getPointerOperand())) +
+                             "\n"
+                             "  value: " +
+                             renderValue(*store.getValueOperand()) + "\n");
         }
 
         auto *newStore = new llvm::StoreInst(*valueOrErr, *pointerOrErr,
@@ -760,9 +853,22 @@ private:
             blockMap_[&oldBlock] = newBlock;
         }
 
+        llvm::SmallVector<llvm::BasicBlock *, 16> loweringOrder;
+        loweringOrder.reserve(oldFunction.size());
+
+        llvm::DominatorTree domTree(oldFunction);
+        llvm::SmallPtrSet<llvm::BasicBlock *, 16> scheduled;
+        collectDominancePreorder(domTree.getRootNode(), loweringOrder, scheduled);
+
         for (auto &oldBlock : oldFunction) {
-            auto *newBlock = blockMap_[&oldBlock];
-            for (auto &instruction : oldBlock) {
+            if (!scheduled.contains(&oldBlock)) {
+                loweringOrder.push_back(&oldBlock);
+            }
+        }
+
+        for (auto *oldBlock : loweringOrder) {
+            auto *newBlock = blockMap_[oldBlock];
+            for (auto &instruction : *oldBlock) {
                 auto loweredOrErr =
                     lowerInstruction(instruction, *newBlock, newFunction);
                 if (!loweredOrErr) {
@@ -784,6 +890,74 @@ private:
                 auto incomingOrErr = mapValue(*oldIncoming, newPhi->getType());
                 if (!incomingOrErr) {
                     return incomingOrErr.takeError();
+                }
+                if ((*incomingOrErr)->getType() != newPhi->getType()) {
+                    std::string loadState = "n/a";
+                    std::string slotState = "n/a";
+                    std::string pointerOperand = "n/a";
+                    std::string aggregateBaseState = "n/a";
+                    std::string pointerIncomingStates = "n/a";
+                    if (auto *load = llvm::dyn_cast<llvm::LoadInst>(oldIncoming)) {
+                        loadState =
+                            renderPointerState(analysis_.getValueState(*load));
+                        pointerOperand = renderValue(*load->getPointerOperand());
+                        if (auto *slot = getTrackedSlot(*load->getPointerOperand())) {
+                            slotState =
+                                renderPointerState(analysis_.getSlotState(*slot));
+                        }
+                        auto *location =
+                            load->getPointerOperand()->stripPointerCasts();
+                        if (auto *gep =
+                                llvm::dyn_cast<llvm::GetElementPtrInst>(location)) {
+                            aggregateBaseState = renderPointerState(
+                                analysis_.getValueState(*gep->getPointerOperand()));
+                        } else if (auto *phi =
+                                       llvm::dyn_cast<llvm::PHINode>(location)) {
+                            pointerIncomingStates.clear();
+                            for (unsigned incomingIndex = 0;
+                                 incomingIndex < phi->getNumIncomingValues();
+                                 ++incomingIndex) {
+                                if (!pointerIncomingStates.empty()) {
+                                    pointerIncomingStates += "\n";
+                                }
+                                auto *incomingValue =
+                                    phi->getIncomingValue(incomingIndex);
+                                pointerIncomingStates += "    from ";
+                                pointerIncomingStates +=
+                                    phi->getIncomingBlock(incomingIndex)->getName().str();
+                                pointerIncomingStates += ": ";
+                                pointerIncomingStates += renderValue(*incomingValue);
+                                pointerIncomingStates += " ; location-state=";
+                                pointerIncomingStates += renderPointerState(
+                                    analysis_.getLocationState(*incomingValue));
+                                pointerIncomingStates += " ; value-state=";
+                                pointerIncomingStates += renderPointerState(
+                                    analysis_.getValueState(*incomingValue));
+                            }
+                        }
+                    }
+                    return makeError(
+                        "managed pointer lowering produced a PHI type mismatch in "
+                        "function `" +
+                        oldFunction.getName().str() + "`\n"
+                        "  phi: " +
+                        renderValue(*oldPhi) + "\n"
+                        "  incoming: " +
+                        renderValue(*oldIncoming) + "\n"
+                        "  expected type: " +
+                        renderType(*newPhi->getType()) + "\n"
+                        "  actual type: " +
+                        renderType(*(*incomingOrErr)->getType()) + "\n"
+                        "  incoming state: " +
+                        loadState + "\n"
+                        "  incoming slot state: " +
+                        slotState + "\n"
+                        "  load pointer operand: " +
+                        pointerOperand + "\n"
+                        "  aggregate base state: " +
+                        aggregateBaseState + "\n"
+                        "  pointer incoming states:\n" +
+                        pointerIncomingStates + "\n");
                 }
                 newPhi->addIncoming(*incomingOrErr,
                                     blockMap_[oldPhi->getIncomingBlock(index)]);

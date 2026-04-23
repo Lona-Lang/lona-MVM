@@ -1,0 +1,191 @@
+#[extern "C"]
+def __mvm_malloc[T]() T*
+
+#[extern "C"]
+def __mvm_request_gc()
+
+struct Label {
+    set code usize
+    set bias i32
+}
+
+struct Stats {
+    set primary Label*
+    set backup Label*
+    set weight i32
+}
+
+struct Payload {
+    set front Stats*
+    set rear Stats*
+    set id i32
+}
+
+struct Node {
+    set next Node*
+    set payload Payload*
+    set stamp usize
+}
+
+def next_seed(seed usize) usize {
+    ret (seed * 17_usize + 29_usize) % 997_usize
+}
+
+def make_label(code usize, bias i32) Label* {
+    var label = __mvm_malloc[Label]()
+    label.code = code
+    label.bias = bias
+    ret label
+}
+
+def make_stats(seed usize, base i32) Stats* {
+    var stats = __mvm_malloc[Stats]()
+    stats.primary = make_label(seed + 1_usize, base + 3_i32)
+    stats.backup = make_label(seed + 5_usize, base + 7_i32)
+    stats.weight = base + cast[i32](seed % 23_usize)
+    ret stats
+}
+
+def make_payload(step usize, seed usize) Payload* {
+    var payload = __mvm_malloc[Payload]()
+    var payload_id = cast[i32]((step * 13_usize + seed) % 997_usize)
+    payload.front = make_stats(seed + 11_usize, payload_id + 5_i32)
+    payload.rear = make_stats(seed + 17_usize, payload_id + 9_i32)
+    payload.id = payload_id
+    ret payload
+}
+
+def make_node(step usize, seed usize, stamp usize) Node* {
+    var node = __mvm_malloc[Node]()
+    node.next = null
+    node.payload = make_payload(step, seed)
+    node.stamp = stamp
+    ret node
+}
+
+def payload_score(payload Payload*) i32 {
+    ret payload.id +
+        payload.front.weight +
+        payload.rear.weight +
+        payload.front.primary.bias +
+        payload.front.backup.bias +
+        payload.rear.primary.bias +
+        payload.rear.backup.bias +
+        cast[i32](payload.front.primary.code % 31_usize) +
+        cast[i32](payload.rear.backup.code % 19_usize)
+}
+
+def node_score(node Node*) i32 {
+    ret payload_score(node.payload) + cast[i32](node.stamp % 17_usize)
+}
+
+def advance(head Node*, steps usize) Node* {
+    var cursor = head
+    var remaining = steps
+    for cursor != null && remaining != 0_usize {
+        if cursor.next == null {
+            break
+        }
+        cursor = cursor.next
+        remaining -= 1_usize
+    }
+    ret cursor
+}
+
+def main() i32 {
+    var head Node* = null
+    var live_count usize = 0_usize
+    var seed usize = 7_usize
+    var iteration usize = 0_usize
+
+    for iteration < 48_usize {
+        seed = next_seed(seed)
+
+        {
+            var transient = make_node(iteration + 400_usize, seed + 101_usize,
+                                      iteration + 9000_usize)
+            if transient == null || transient.payload == null {
+                ret 10
+            }
+        }
+
+        var node = make_node(iteration, seed, iteration + 100_usize)
+        if node == null || node.payload == null {
+            ret 11
+        }
+
+        if head == null || seed % 3_usize == 0_usize {
+            node.next = head
+            head = node
+            live_count += 1_usize
+        } else {
+            var step usize = 0_usize
+            if live_count != 0_usize {
+                step = seed % live_count
+            }
+            var anchor = advance(head, step)
+            if anchor == null {
+                ret 12
+            }
+            node.next = anchor.next
+            anchor.next = node
+            live_count += 1_usize
+        }
+
+        if live_count > 3_usize && seed % 5_usize == 0_usize {
+            if head != null && head.next != null {
+                head.next = head.next.next
+                live_count -= 1_usize
+            }
+        } else if live_count > 4_usize && seed % 7_usize == 0_usize {
+            if head != null {
+                head = head.next
+                live_count -= 1_usize
+            }
+        }
+
+        if iteration % 6_usize == 0_usize {
+            __mvm_request_gc()
+        }
+
+        iteration += 1_usize
+    }
+
+    __mvm_request_gc()
+
+    var cursor = head
+    var count usize = 0_usize
+    var checksum i32 = 0_i32
+    for cursor != null {
+        if cursor.payload == null ||
+           cursor.payload.front == null ||
+           cursor.payload.front.primary == null ||
+           cursor.payload.front.backup == null ||
+           cursor.payload.rear == null ||
+           cursor.payload.rear.primary == null ||
+           cursor.payload.rear.backup == null {
+            ret 20
+        }
+
+        checksum += node_score(cursor)
+        count += 1_usize
+        if count > live_count + 1_usize {
+            ret 21
+        }
+        cursor = cursor.next
+    }
+
+    if count != live_count {
+        ret 22
+    }
+    if live_count == 0_usize {
+        ret 23
+    }
+    if checksum == 0_i32 {
+        ret 24
+    }
+
+    ret 0
+}
+
+ret main()

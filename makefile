@@ -69,6 +69,8 @@ GC_COLLECT_GARBAGE_LO := $(ROOT)/examples/gc_collect_garbage.lo
 GC_COLLECT_GARBAGE_BC := $(OUT_DIR)/examples/gc_collect_garbage.bc
 GC_STRUCT_REACHABILITY_LO := $(ROOT)/examples/gc_struct_reachability.lo
 GC_STRUCT_REACHABILITY_BC := $(OUT_DIR)/examples/gc_struct_reachability.bc
+LINKED_LIST_STRESS_LO := $(ROOT)/examples/linked_list_stress.lo
+LINKED_LIST_STRESS_BC := $(OUT_DIR)/examples/linked_list_stress.bc
 
 .PHONY: all clean test ir-demo
 
@@ -79,7 +81,7 @@ ir-demo: $(TARGET) $(IR_PIPELINE_DEMO_RAW_LL) $(IR_PIPELINE_DEMO_AFTER_LL)
 test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(GC_ROOT_SCAN_TEST_TARGET) $(GC_COLLECT_TEST_TARGET) $(GC_STRUCT_LAYOUT_TEST_TARGET) $(EXAMPLE_BC) \
 	$(STATIC_ARRAY_OK_BC) $(STATIC_ARRAY_OOB_BC) $(NO_DEBUG_BC) \
 	$(INVALID_BC) $(RUNTIME_ARRAY_API_BC) $(RUNTIME_ARRAY_API_MBC) \
-	$(RUNTIME_ARRAY_OOB_BC) $(GC_ROOT_SCAN_BC) $(GC_AUTO_TRIGGER_BC) $(GC_COLLECT_GARBAGE_BC) $(GC_STRUCT_REACHABILITY_BC) \
+	$(RUNTIME_ARRAY_OOB_BC) $(GC_ROOT_SCAN_BC) $(GC_AUTO_TRIGGER_BC) $(GC_COLLECT_GARBAGE_BC) $(GC_STRUCT_REACHABILITY_BC) $(LINKED_LIST_STRESS_BC) \
 	$(RUNTIME_ARGV_BC) $(MANAGED_STATE_BC) $(MANAGED_DISPATCH_BC) \
 	$(INVALID_RAW_MALLOC_BC) $(INVALID_ELEMENT_ADDRESS_STDERR)
 	$(RUNTIME_MEMORY_TEST_TARGET)
@@ -87,6 +89,7 @@ test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(GC_ROOT_SCAN_TEST_TARGET) $(GC_C
 	$(GC_ROOT_SCAN_TEST_TARGET) $(GC_AUTO_TRIGGER_BC)
 	$(GC_COLLECT_TEST_TARGET) $(GC_COLLECT_GARBAGE_BC)
 	$(GC_STRUCT_LAYOUT_TEST_TARGET) $(GC_STRUCT_REACHABILITY_BC)
+	$(GC_COLLECT_TEST_TARGET) $(LINKED_LIST_STRESS_BC)
 	$(TARGET) --dump-ir $(EXAMPLE_BC) | rg 'llvm\.experimental\.gc\.statepoint|gc "statepoint-example"'
 	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'mvm\.managed\.signature|arg0=array'
 	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'ptr addrspace\(1\)|llvm\.experimental\.gc\.relocate\.p1'
@@ -216,6 +219,10 @@ $(GC_COLLECT_GARBAGE_BC): $(GC_COLLECT_GARBAGE_LO) makefile
 	$(LONA_IR) --emit mbc --verify-ir -g $< $@
 
 $(GC_STRUCT_REACHABILITY_BC): $(GC_STRUCT_REACHABILITY_LO) makefile
+	mkdir -p $(dir $@)
+	$(LONA_IR) --emit mbc --verify-ir -g $< $@
+
+$(LINKED_LIST_STRESS_BC): $(LINKED_LIST_STRESS_LO) makefile
 	mkdir -p $(dir $@)
 	$(LONA_IR) --emit mbc --verify-ir -g $< $@
 
