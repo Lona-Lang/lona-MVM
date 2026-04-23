@@ -2,12 +2,16 @@
 
 #include "mvm/gc.hh"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <optional>
+#include <vector>
 
 namespace {
 
@@ -21,10 +25,25 @@ struct AllocationHeader {
     std::uint64_t kind = 0;
     std::uint64_t alignment = 0;
     std::uint64_t elementCount = 0;
+    std::uint64_t payloadSize = 0;
     void *allocationBase = nullptr;
 };
 
+struct AllocationRecord {
+    AllocationKind kind = AllocationKind::Object;
+    std::uintptr_t payloadAddress = 0;
+    std::size_t payloadSize = 0;
+    std::size_t elementCount = 0;
+    void *allocationBase = nullptr;
+    bool marked = false;
+};
+
 constexpr std::uint64_t kAllocationMagic = 0x4D564D4152524159ULL;  // MVMARRAY
+
+std::mutex allocationRegistryMutex;
+std::map<std::uintptr_t, AllocationRecord> allocationRegistry;
+std::uint64_t collectionCount = 0;
+mvm::GCCollectionStats lastCollectionStats;
 
 std::size_t defaultAlignment() { return alignof(std::max_align_t); }
 
@@ -143,12 +162,141 @@ void *allocateTracked(AllocationKind kind, std::size_t payloadSize,
     header->kind = static_cast<std::uint64_t>(kind);
     header->alignment = alignment;
     header->elementCount = elementCount;
+    header->payloadSize = payloadSize;
     header->allocationBase = rawAllocation;
 
     return reinterpret_cast<void *>(alignedAddress);
 }
 
+void registerAllocation(void *payload, AllocationKind kind, std::size_t payloadSize,
+                        std::size_t elementCount, void *allocationBase) {
+    auto payloadAddress = reinterpret_cast<std::uintptr_t>(payload);
+    auto trackedSize = std::max<std::size_t>(payloadSize, 1);
+    std::lock_guard lock(allocationRegistryMutex);
+    allocationRegistry[payloadAddress] = AllocationRecord{
+        kind,
+        payloadAddress,
+        trackedSize,
+        elementCount,
+        allocationBase,
+        false,
+    };
+}
+
+AllocationRecord *findOwningAllocation(std::uintptr_t address) {
+    auto it = allocationRegistry.upper_bound(address);
+    if (it == allocationRegistry.begin()) {
+        return nullptr;
+    }
+    --it;
+
+    auto start = it->second.payloadAddress;
+    auto end = start + it->second.payloadSize;
+    if (address < start || address >= end) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+void markAllocation(AllocationRecord &record,
+                    std::vector<std::uintptr_t> &worklist) {
+    if (record.marked) {
+        return;
+    }
+    record.marked = true;
+    worklist.push_back(record.payloadAddress);
+}
+
+void markAddress(std::uintptr_t address, std::vector<std::uintptr_t> &worklist) {
+    if (address == 0) {
+        return;
+    }
+
+    if (auto *record = findOwningAllocation(address)) {
+        markAllocation(*record, worklist);
+    }
+}
+
+void scanAllocationPayload(const AllocationRecord &record,
+                           std::vector<std::uintptr_t> &worklist) {
+    for (std::size_t offset = 0;
+         offset + sizeof(std::uintptr_t) <= record.payloadSize;
+         offset += sizeof(std::uintptr_t)) {
+        std::uintptr_t candidate = 0;
+        std::memcpy(&candidate,
+                    reinterpret_cast<const void *>(record.payloadAddress + offset),
+                    sizeof(candidate));
+        markAddress(candidate, worklist);
+    }
+}
+
 }  // namespace
+
+namespace mvm {
+
+GCCollectionStats collectManagedHeap(const std::vector<std::uintptr_t> &roots) {
+    std::lock_guard lock(allocationRegistryMutex);
+
+    GCCollectionStats stats;
+    stats.collectionCount = ++collectionCount;
+    stats.heapObjectCountBefore = allocationRegistry.size();
+
+    std::vector<std::uintptr_t> worklist;
+    worklist.reserve(roots.size());
+    for (auto root : roots) {
+        if (root == 0) {
+            continue;
+        }
+        ++stats.rootCount;
+        markAddress(root, worklist);
+    }
+
+    while (!worklist.empty()) {
+        auto address = worklist.back();
+        worklist.pop_back();
+
+        auto it = allocationRegistry.find(address);
+        if (it == allocationRegistry.end()) {
+            continue;
+        }
+        scanAllocationPayload(it->second, worklist);
+    }
+
+    std::vector<std::uintptr_t> garbage;
+    garbage.reserve(allocationRegistry.size());
+    for (auto &[payloadAddress, record] : allocationRegistry) {
+        if (record.marked) {
+            ++stats.liveObjectCount;
+            record.marked = false;
+            continue;
+        }
+
+        ++stats.sweptObjectCount;
+        stats.sweptBytes += record.payloadSize;
+        std::free(record.allocationBase);
+        garbage.push_back(payloadAddress);
+    }
+
+    for (auto payloadAddress : garbage) {
+        allocationRegistry.erase(payloadAddress);
+    }
+
+    stats.heapObjectCountAfter = allocationRegistry.size();
+    lastCollectionStats = stats;
+    return stats;
+}
+
+void clearLastGCCollectionStats() {
+    std::lock_guard lock(allocationRegistryMutex);
+    lastCollectionStats = {};
+}
+
+GCCollectionStats getLastGCCollectionStats() {
+    std::lock_guard lock(allocationRegistryMutex);
+    return lastCollectionStats;
+}
+
+}  // namespace mvm
 
 extern "C" void *__mvm_malloc(std::uint64_t size, std::uint64_t alignment) {
     std::size_t payloadSize = 0;
@@ -160,6 +308,9 @@ extern "C" void *__mvm_malloc(std::uint64_t size, std::uint64_t alignment) {
     auto *payload = allocateTracked(AllocationKind::Object, payloadSize, 1,
                                    requestedAlignment);
     if (payload) {
+        auto *header = reinterpret_cast<AllocationHeader *>(payload) - 1;
+        registerAllocation(payload, AllocationKind::Object, payloadSize, 1,
+                           header->allocationBase);
         mvm::recordManagedAllocation(payloadSize);
     }
     return payload;
@@ -188,6 +339,9 @@ extern "C" void *__mvm_array_malloc(std::uint64_t element_size,
     auto *payload = allocateTracked(AllocationKind::Array, payloadSize, elementCount,
                                     requestedAlignment);
     if (payload) {
+        auto *header = reinterpret_cast<AllocationHeader *>(payload) - 1;
+        registerAllocation(payload, AllocationKind::Array, payloadSize, elementCount,
+                           header->allocationBase);
         mvm::recordManagedAllocation(payloadSize);
     }
     return payload;

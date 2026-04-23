@@ -1,6 +1,7 @@
 #include "mvm/runtime_threads.hh"
 
 #include "mvm/gc.hh"
+#include "mvm/runtime_memory.hh"
 #include "llvm/Support/PrettyStackTrace.h"
 
 namespace mvm {
@@ -17,6 +18,9 @@ void mergeRootScanSummary(GCRootScanSummary &destination,
     destination.rootPairCount += source.rootPairCount;
     destination.rootLocationCount += source.rootLocationCount;
     destination.nonNullRootCount += source.nonNullRootCount;
+    destination.rootValues.insert(destination.rootValues.end(),
+                                  source.rootValues.begin(),
+                                  source.rootValues.end());
 }
 
 RuntimeThreads *getInstalledRuntimeThreads() {
@@ -97,9 +101,11 @@ void RuntimeThreads::vmThreadMain(std::stop_token stopToken) {
         }
 
         ++completedGCCycleCount_;
+        auto collectionStats = collectManagedHeap(pendingRootSummary_.rootValues);
         pendingRootSummary_.mutatorCount = activeMutatorCount_;
         pendingRootSummary_.gcCycle = completedGCCycleCount_;
         recordLastRootScanSummary(pendingRootSummary_);
+        (void)collectionStats;
 
         clearGCRequest();
         resetGCAllocationBudget();

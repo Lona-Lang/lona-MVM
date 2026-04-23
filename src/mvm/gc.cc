@@ -834,6 +834,7 @@ llvm::Expected<GCRootScanSummary> GCStackMapRegistry::scanCurrentSafepoint(
     summary.safepointAddress = it->instructionAddress;
     summary.rootPairCount = it->rootPairs.size();
     summary.rootLocationCount = it->rootPairs.size() * 2;
+    summary.rootValues.reserve(summary.rootLocationCount);
 
     for (const auto &pair : it->rootPairs) {
         auto baseOrErr = resolveRootValue(pair.base, callerSP, callerBP);
@@ -842,6 +843,7 @@ llvm::Expected<GCRootScanSummary> GCStackMapRegistry::scanCurrentSafepoint(
         }
         if (*baseOrErr != 0) {
             ++summary.nonNullRootCount;
+            summary.rootValues.push_back(*baseOrErr);
         }
 
         auto derivedOrErr = resolveRootValue(pair.derived, callerSP, callerBP);
@@ -850,6 +852,7 @@ llvm::Expected<GCRootScanSummary> GCStackMapRegistry::scanCurrentSafepoint(
         }
         if (*derivedOrErr != 0) {
             ++summary.nonNullRootCount;
+            summary.rootValues.push_back(*derivedOrErr);
         }
     }
 

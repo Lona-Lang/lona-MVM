@@ -5,6 +5,7 @@
 #include "mvm/gc.hh"
 #include "mvm/jit.hh"
 #include "mvm/pipeline.hh"
+#include "mvm/runtime_memory.hh"
 #include "mvm/runtime_threads.hh"
 #include "mvm/verifier.hh"
 #include "llvm/Support/PrettyStackTrace.h"
@@ -108,6 +109,7 @@ llvm::Expected<int> runManagedProgram(const Options &options) {
             clearGCRequest();
             resetGCAllocationBudget();
             clearLastRootScanSummary();
+            clearLastGCCollectionStats();
             auto exitCodeOrErr = executor->invoke(entry, argv0, args);
             unregisterMutatorThread();
             clearGCStackMapRegistry();

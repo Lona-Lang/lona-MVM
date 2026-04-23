@@ -7,8 +7,8 @@
 #include "llvm/Support/Error.h"
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace mvm {
@@ -51,6 +51,7 @@ struct GCRootScanSummary {
     std::size_t nonNullRootCount = 0;
     std::size_t mutatorCount = 0;
     std::uint64_t gcCycle = 0;
+    std::vector<std::uintptr_t> rootValues;
 };
 
 class GCStackMapRegistry {
