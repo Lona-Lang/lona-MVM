@@ -25,8 +25,9 @@ namespace {
 constexpr unsigned kManagedAddressSpace = 1;
 constexpr llvm::StringLiteral kManagedObjectAllocName = "__mvm_malloc";
 constexpr llvm::StringLiteral kManagedArrayAllocName = "__mvm_array_malloc";
-constexpr llvm::StringLiteral kManagedObjectFreeName = "__mvm_free";
-constexpr llvm::StringLiteral kManagedArrayFreeName = "__mvm_array_free";
+constexpr llvm::StringLiteral kManagedTypedObjectAllocName = "__mvm_malloc_typed";
+constexpr llvm::StringLiteral kManagedTypedArrayAllocName =
+    "__mvm_array_malloc_typed";
 constexpr llvm::StringLiteral kManagedArrayLengthName = "__mvm_array_length";
 
 bool isConcreteManagedKind(ManagedPointerKind kind) {
@@ -37,8 +38,8 @@ bool isConcreteManagedKind(ManagedPointerKind kind) {
 bool isManagedRuntimeDeclaration(const llvm::Function &function) {
     auto name = function.getName();
     return name == kManagedObjectAllocName || name == kManagedArrayAllocName ||
-           name == kManagedObjectFreeName || name == kManagedArrayFreeName ||
-           name == kManagedArrayLengthName;
+           name == kManagedTypedObjectAllocName ||
+           name == kManagedTypedArrayAllocName || name == kManagedArrayLengthName;
 }
 
 llvm::PointerType *managedPointerType(llvm::LLVMContext &context) {
@@ -199,15 +200,21 @@ private:
         const llvm::Function &function) const {
         auto &context = module_.getContext();
         auto *i64 = llvm::Type::getInt64Ty(context);
+        auto *ptr = llvm::PointerType::get(context, 0);
         auto *managedPtr = managedPointerType(context);
 
         auto name = function.getName();
-        if (name == kManagedObjectAllocName || name == kManagedArrayAllocName) {
-            return llvm::FunctionType::get(managedPtr, {i64, i64, i64}, false);
+        if (name == kManagedObjectAllocName) {
+            return llvm::FunctionType::get(managedPtr, {}, false);
         }
-        if (name == kManagedObjectFreeName || name == kManagedArrayFreeName) {
-            return llvm::FunctionType::get(llvm::Type::getVoidTy(context),
-                                           {managedPtr}, false);
+        if (name == kManagedArrayAllocName) {
+            return llvm::FunctionType::get(managedPtr, {i64}, false);
+        }
+        if (name == kManagedTypedObjectAllocName) {
+            return llvm::FunctionType::get(managedPtr, {ptr}, false);
+        }
+        if (name == kManagedTypedArrayAllocName) {
+            return llvm::FunctionType::get(managedPtr, {i64, ptr}, false);
         }
         if (name == kManagedArrayLengthName) {
             return llvm::FunctionType::get(i64, {managedPtr}, false);

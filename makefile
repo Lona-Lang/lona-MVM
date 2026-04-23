@@ -31,6 +31,9 @@ GC_ROOT_SCAN_TEST_TARGET := $(OUT_DIR)/gc_root_scan_test
 GC_COLLECT_TEST_SOURCE := $(ROOT)/tests/gc_collect_test.cc
 GC_COLLECT_TEST_OBJECT := $(patsubst %.cc,$(OUT_DIR)/%.o,$(GC_COLLECT_TEST_SOURCE))
 GC_COLLECT_TEST_TARGET := $(OUT_DIR)/gc_collect_test
+GC_STRUCT_LAYOUT_TEST_SOURCE := $(ROOT)/tests/gc_struct_layout_test.cc
+GC_STRUCT_LAYOUT_TEST_OBJECT := $(patsubst %.cc,$(OUT_DIR)/%.o,$(GC_STRUCT_LAYOUT_TEST_SOURCE))
+GC_STRUCT_LAYOUT_TEST_TARGET := $(OUT_DIR)/gc_struct_layout_test
 EXAMPLE_LO := $(ROOT)/examples/hello.lo
 EXAMPLE_BC := $(OUT_DIR)/examples/hello.bc
 STATIC_ARRAY_OK_LO := $(ROOT)/examples/static_array_ok.lo
@@ -48,7 +51,7 @@ RUNTIME_ARGV_LO := $(ROOT)/examples/runtime_argv.lo
 RUNTIME_ARGV_BC := $(OUT_DIR)/examples/runtime_argv.bc
 MANAGED_STATE_LO := $(ROOT)/examples/managed_state.lo
 MANAGED_STATE_BC := $(OUT_DIR)/examples/managed_state.bc
-MANAGED_DISPATCH_C := $(ROOT)/examples/managed_dispatch.c
+MANAGED_DISPATCH_LO := $(ROOT)/examples/managed_dispatch.lo
 MANAGED_DISPATCH_BC := $(OUT_DIR)/examples/managed_dispatch.bc
 INVALID_RAW_MALLOC_LO := $(ROOT)/examples/runtime_raw_malloc.lo
 INVALID_RAW_MALLOC_BC := $(OUT_DIR)/examples/runtime_raw_malloc.bc
@@ -64,6 +67,8 @@ GC_AUTO_TRIGGER_LO := $(ROOT)/examples/gc_auto_trigger.lo
 GC_AUTO_TRIGGER_BC := $(OUT_DIR)/examples/gc_auto_trigger.bc
 GC_COLLECT_GARBAGE_LO := $(ROOT)/examples/gc_collect_garbage.lo
 GC_COLLECT_GARBAGE_BC := $(OUT_DIR)/examples/gc_collect_garbage.bc
+GC_STRUCT_REACHABILITY_LO := $(ROOT)/examples/gc_struct_reachability.lo
+GC_STRUCT_REACHABILITY_BC := $(OUT_DIR)/examples/gc_struct_reachability.bc
 
 .PHONY: all clean test ir-demo
 
@@ -71,24 +76,25 @@ all: $(TARGET)
 
 ir-demo: $(TARGET) $(IR_PIPELINE_DEMO_RAW_LL) $(IR_PIPELINE_DEMO_AFTER_LL)
 
-test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(GC_ROOT_SCAN_TEST_TARGET) $(GC_COLLECT_TEST_TARGET) $(EXAMPLE_BC) \
+test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(GC_ROOT_SCAN_TEST_TARGET) $(GC_COLLECT_TEST_TARGET) $(GC_STRUCT_LAYOUT_TEST_TARGET) $(EXAMPLE_BC) \
 	$(STATIC_ARRAY_OK_BC) $(STATIC_ARRAY_OOB_BC) $(NO_DEBUG_BC) \
 	$(INVALID_BC) $(RUNTIME_ARRAY_API_BC) $(RUNTIME_ARRAY_API_MBC) \
-	$(RUNTIME_ARRAY_OOB_BC) $(GC_ROOT_SCAN_BC) $(GC_AUTO_TRIGGER_BC) $(GC_COLLECT_GARBAGE_BC) \
+	$(RUNTIME_ARRAY_OOB_BC) $(GC_ROOT_SCAN_BC) $(GC_AUTO_TRIGGER_BC) $(GC_COLLECT_GARBAGE_BC) $(GC_STRUCT_REACHABILITY_BC) \
 	$(RUNTIME_ARGV_BC) $(MANAGED_STATE_BC) $(MANAGED_DISPATCH_BC) \
 	$(INVALID_RAW_MALLOC_BC) $(INVALID_ELEMENT_ADDRESS_STDERR)
 	$(RUNTIME_MEMORY_TEST_TARGET)
 	$(GC_ROOT_SCAN_TEST_TARGET) $(GC_ROOT_SCAN_BC)
 	$(GC_ROOT_SCAN_TEST_TARGET) $(GC_AUTO_TRIGGER_BC)
 	$(GC_COLLECT_TEST_TARGET) $(GC_COLLECT_GARBAGE_BC)
+	$(GC_STRUCT_LAYOUT_TEST_TARGET) $(GC_STRUCT_REACHABILITY_BC)
 	$(TARGET) --dump-ir $(EXAMPLE_BC) | rg 'llvm\.experimental\.gc\.statepoint|gc "statepoint-example"'
 	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'mvm\.managed\.signature|arg0=array'
 	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'ptr addrspace\(1\)|llvm\.experimental\.gc\.relocate\.p1'
-	$(TARGET) -O1 --dump-ir $(MANAGED_DISPATCH_BC) | rg '@middle\.__mvm\.arg0_raw|@middle\.__mvm\.arg0_array'
-	$(TARGET) -O1 --dump-ir $(MANAGED_DISPATCH_BC) | rg '@leaf\.__mvm\.arg0_raw|@leaf\.__mvm\.arg0_array'
-	$(TARGET) -O1 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg 'declare .*@__mvm_array_length\(ptr addrspace\(1\)\)|declare .*@__mvm_array_free\(ptr addrspace\(1\)\)'
+	$(TARGET) -O1 --dump-ir $(MANAGED_DISPATCH_BC) | rg 'declare !mvm\.managed\.signature .*@__mvm_malloc_typed\(ptr\)|ptr addrspace\(1\) @llvm\.experimental\.gc\.result\.p1'
+	$(TARGET) -O1 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg 'declare .*@__mvm_array_length\(ptr addrspace\(1\)\)|declare .*@__mvm_array_malloc_typed\(i64, ptr\)'
 	$(TARGET) -O1 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg 'ptr addrspace\(1\)|llvm\.experimental\.gc\.relocate\.p1'
 	$(TARGET) -O1 --dump-ir $(RUNTIME_ARRAY_API_MBC) | rg '!mvm\.gc\.module = !\{|!mvm\.gc\.function = !\{|!mvm\.gc\.statepoint|!mvm\.gc\.relocate'
+	$(TARGET) -O1 --dump-ir $(GC_STRUCT_REACHABILITY_BC) | rg '@__mvm_malloc_typed|__mvm_layout'
 	$(TARGET) $(EXAMPLE_BC)
 	$(TARGET) $(STATIC_ARRAY_OK_BC)
 	$(TARGET) $(RUNTIME_ARRAY_API_BC)
@@ -123,6 +129,11 @@ $(GC_COLLECT_TEST_TARGET): $(LIBRARY_OBJECTS) $(GC_COLLECT_TEST_OBJECT)
 	$(CXX) $^ $(CXXFLAGS) $(INCLUDE_PATHS) $(LLVM_LD_FLAGS) \
 		$(EXPORT_DYNAMIC_FLAGS) -o $@
 
+$(GC_STRUCT_LAYOUT_TEST_TARGET): $(LIBRARY_OBJECTS) $(GC_STRUCT_LAYOUT_TEST_OBJECT)
+	mkdir -p $(dir $@)
+	$(CXX) $^ $(CXXFLAGS) $(INCLUDE_PATHS) $(LLVM_LD_FLAGS) \
+		$(EXPORT_DYNAMIC_FLAGS) -o $@
+
 $(OUT_DIR)/%.d: %.cc makefile
 	mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(INCLUDE_PATHS) -MM $< -MT $(@:.d=.o) > $@
@@ -153,7 +164,7 @@ $(INVALID_BC): $(ROOT)/examples/invalid_ptr_cast.ll makefile
 
 $(RUNTIME_ARRAY_API_BC): $(RUNTIME_ARRAY_API_LO) makefile
 	mkdir -p $(dir $@)
-	$(LONA_IR) --emit linked-bc --verify-ir -g $< $@
+	$(LONA_IR) --emit mbc --verify-ir -g $< $@
 
 $(RUNTIME_ARRAY_API_MBC): $(RUNTIME_ARRAY_API_LO) makefile
 	mkdir -p $(dir $@)
@@ -161,7 +172,7 @@ $(RUNTIME_ARRAY_API_MBC): $(RUNTIME_ARRAY_API_LO) makefile
 
 $(RUNTIME_ARRAY_OOB_BC): $(RUNTIME_ARRAY_OOB_LO) makefile
 	mkdir -p $(dir $@)
-	$(LONA_IR) --emit linked-bc --verify-ir -g $< $@
+	$(LONA_IR) --emit mbc --verify-ir -g $< $@
 
 $(RUNTIME_ARGV_BC): $(RUNTIME_ARGV_LO) makefile
 	mkdir -p $(dir $@)
@@ -169,11 +180,11 @@ $(RUNTIME_ARGV_BC): $(RUNTIME_ARGV_LO) makefile
 
 $(MANAGED_STATE_BC): $(MANAGED_STATE_LO) makefile
 	mkdir -p $(dir $@)
-	$(LONA_IR) --emit linked-bc --verify-ir -g $< $@
+	$(LONA_IR) --emit mbc --verify-ir -g $< $@
 
-$(MANAGED_DISPATCH_BC): $(MANAGED_DISPATCH_C) makefile
+$(MANAGED_DISPATCH_BC): $(MANAGED_DISPATCH_LO) makefile
 	mkdir -p $(dir $@)
-	$(CLANG) -g -O1 -emit-llvm -c $< -o $@
+	$(LONA_IR) --emit mbc --verify-ir -g $< $@
 
 $(INVALID_RAW_MALLOC_BC): $(INVALID_RAW_MALLOC_LO) makefile
 	mkdir -p $(dir $@)
@@ -204,6 +215,10 @@ $(GC_COLLECT_GARBAGE_BC): $(GC_COLLECT_GARBAGE_LO) makefile
 	mkdir -p $(dir $@)
 	$(LONA_IR) --emit mbc --verify-ir -g $< $@
 
+$(GC_STRUCT_REACHABILITY_BC): $(GC_STRUCT_REACHABILITY_LO) makefile
+	mkdir -p $(dir $@)
+	$(LONA_IR) --emit mbc --verify-ir -g $< $@
+
 $(IR_PIPELINE_DEMO_AFTER_LL): $(IR_PIPELINE_DEMO_BC) $(TARGET)
 	mkdir -p $(dir $@)
 	$(TARGET) -O1 --dump-ir $< > $@
@@ -214,6 +229,7 @@ ifneq ($(filter clean,$(MAKECMDGOALS)),clean)
 -include $(RUNTIME_MEMORY_TEST_OBJECT:.o=.d)
 -include $(GC_ROOT_SCAN_TEST_OBJECT:.o=.d)
 -include $(GC_COLLECT_TEST_OBJECT:.o=.d)
+-include $(GC_STRUCT_LAYOUT_TEST_OBJECT:.o=.d)
 endif
 
 clean:

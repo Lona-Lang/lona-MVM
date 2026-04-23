@@ -14,6 +14,9 @@ namespace {
 
 constexpr llvm::StringLiteral kManagedObjectAllocName = "__mvm_malloc";
 constexpr llvm::StringLiteral kManagedArrayAllocName = "__mvm_array_malloc";
+constexpr llvm::StringLiteral kManagedTypedObjectAllocName = "__mvm_malloc_typed";
+constexpr llvm::StringLiteral kManagedTypedArrayAllocName =
+    "__mvm_array_malloc_typed";
 constexpr llvm::StringLiteral kManagedKindMetadataName = "mvm.managed.kind";
 constexpr llvm::StringLiteral kManagedSlotMetadataName = "mvm.managed.slot";
 constexpr llvm::StringLiteral kManagedSignatureMetadataName =
@@ -249,10 +252,12 @@ PointerState ManagedStateAnalysis::getCallResultState(
         return {};
     }
 
-    if (callee.getName() == kManagedObjectAllocName) {
+    if (callee.getName() == kManagedObjectAllocName ||
+        callee.getName() == kManagedTypedObjectAllocName) {
         return {kStateManagedObject};
     }
-    if (callee.getName() == kManagedArrayAllocName) {
+    if (callee.getName() == kManagedArrayAllocName ||
+        callee.getName() == kManagedTypedArrayAllocName) {
         return {kStateManagedArray};
     }
 

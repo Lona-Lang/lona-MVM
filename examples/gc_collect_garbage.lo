@@ -1,11 +1,11 @@
 #[extern "C"]
-def __mvm_array_malloc(element_size usize, element_count usize, alignment usize) u32[*]
+def __mvm_array_malloc[T](element_count usize) T[*]
 
 #[extern "C"]
 def __mvm_request_gc()
 
 def allocateGarbage() bool {
-    var garbage = __mvm_array_malloc(sizeof[u32](), 32_usize, 4_usize)
+    var garbage = __mvm_array_malloc[u32](32_usize)
     if garbage == null {
         ret false
     }
@@ -19,7 +19,7 @@ def main() i32 {
         ret 10
     }
 
-    var live = __mvm_array_malloc(sizeof[u32](), 4_usize, 4_usize)
+    var live = __mvm_array_malloc[u32](4_usize)
     if live == null {
         ret 11
     }

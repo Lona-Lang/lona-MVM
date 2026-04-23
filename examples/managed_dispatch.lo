@@ -1,0 +1,39 @@
+struct Cell {
+    set value u8
+}
+
+#[extern "C"]
+def __mvm_malloc[T]() T*
+
+def leaf(slot Cell*) bool {
+    ret slot == null
+}
+
+def middle(slot Cell*) bool {
+    ret leaf(slot)
+}
+
+def main() i32 {
+    var local Cell = Cell(value = 7_u8)
+    var raw Cell* = &local
+    var managed = __mvm_malloc[Cell]()
+    if managed == null {
+        ret 10
+    }
+
+    managed.value = 1_u8
+
+    if middle(raw) {
+        ret 11
+    }
+    if middle(managed) {
+        ret 12
+    }
+    if managed.value != 1_u8 {
+        ret 13
+    }
+
+    ret 0
+}
+
+ret main()

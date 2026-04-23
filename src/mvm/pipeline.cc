@@ -3,6 +3,7 @@
 #include "mvm/bounds_instrumentation.hh"
 #include "mvm/error.hh"
 #include "mvm/gc.hh"
+#include "mvm/heap_layout.hh"
 #include "mvm/managed_dispatch.hh"
 #include "mvm/managed_pointer_lowering.hh"
 #include "mvm/managed_state.hh"
@@ -62,6 +63,10 @@ llvm::Error ModulePipeline::run(llvm::Module &module, int optLevel) const {
     passManager.run(module, moduleAnalysisManager);
 
     if (auto error = specializeManagedDispatch(module)) {
+        return error;
+    }
+
+    if (auto error = annotateManagedHeapLayouts(module)) {
         return error;
     }
 

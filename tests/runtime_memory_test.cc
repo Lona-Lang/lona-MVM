@@ -21,13 +21,25 @@ bool isAligned(const void *pointer, std::size_t alignment) {
 }  // namespace
 
 int main() {
-    void *object = __mvm_malloc(32, 16);
+    mvm::GCLayoutDescriptor objectLayout{
+        32,
+        alignof(std::max_align_t),
+        0,
+        nullptr,
+    };
+    void *object = __mvm_malloc_typed(&objectLayout);
     require(object != nullptr, "object allocation returned null");
-    require(isAligned(object, 16), "object allocation alignment mismatch");
-    __mvm_free(object);
+    require(isAligned(object, alignof(std::max_align_t)),
+            "object allocation alignment mismatch");
 
+    mvm::GCLayoutDescriptor scalarArrayLayout{
+        sizeof(std::uint32_t),
+        alignof(std::uint32_t),
+        0,
+        nullptr,
+    };
     auto *array = static_cast<std::uint32_t *>(
-        __mvm_array_malloc(sizeof(std::uint32_t), 4, alignof(std::uint32_t)));
+        __mvm_array_malloc_typed(4, &scalarArrayLayout));
     require(array != nullptr, "array allocation returned null");
     require(isAligned(array, alignof(std::uint32_t)),
             "array allocation alignment mismatch");
@@ -38,6 +50,5 @@ int main() {
     require(array[0] == 7, "array write/read mismatch at index 0");
     require(array[3] == 9, "array write/read mismatch at index 3");
 
-    __mvm_array_free(array);
     return 0;
 }

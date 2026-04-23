@@ -7,6 +7,13 @@
 
 namespace mvm {
 
+struct GCLayoutDescriptor {
+    std::uint64_t elementSize = 0;
+    std::uint64_t alignment = 0;
+    std::uint64_t pointerSlotCount = 0;
+    const std::uint64_t *pointerSlotOffsets = nullptr;
+};
+
 struct GCCollectionStats {
     std::uint64_t collectionCount = 0;
     std::size_t rootCount = 0;
@@ -25,12 +32,11 @@ GCCollectionStats getLastGCCollectionStats();
 
 extern "C" {
 
-void *__mvm_malloc(std::uint64_t size, std::uint64_t alignment);
-void *__mvm_array_malloc(std::uint64_t element_size,
-                         std::uint64_t element_count,
-                         std::uint64_t alignment);
-void __mvm_free(void *payload);
-void __mvm_array_free(void *payload);
+void *__mvm_malloc();
+void *__mvm_malloc_typed(const void *layout);
+void *__mvm_array_malloc(std::uint64_t element_count);
+void *__mvm_array_malloc_typed(std::uint64_t element_count,
+                               const void *layout);
 std::uint64_t __mvm_array_length(const void *payload);
 
 }  // extern "C"

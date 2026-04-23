@@ -1,0 +1,35 @@
+#[extern "C"]
+def __mvm_malloc[T]() T*
+
+#[extern "C"]
+def __mvm_request_gc()
+
+struct Node {
+    set next Node*
+    set value i32
+}
+
+def make_node(value i32, next Node*) Node* {
+    var node = __mvm_malloc[Node]()
+    node.next = next
+    node.value = value
+    ret node
+}
+
+def main() i32 {
+    var live = make_node(42, null)
+    var garbage = make_node(9, null)
+    var holder = make_node(7, live)
+    live = null
+    garbage = null
+    __mvm_request_gc()
+    if holder.next == null {
+        ret 1
+    }
+    if holder.next.value != 42 {
+        ret 2
+    }
+    ret 0
+}
+
+ret main()

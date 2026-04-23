@@ -155,23 +155,23 @@ policy stage that can grow stricter when GC metadata and object rules land.
 
 Managed-mode memory is now expected to go through MVM-owned symbols:
 
-- `__mvm_malloc(size, alignment)`
-- `__mvm_array_malloc(element_size, element_count, alignment)`
-- `__mvm_free(ptr)`
-- `__mvm_array_free(ptr)`
+- `__mvm_malloc()`
+- `__mvm_array_malloc(element_count)`
 - `__mvm_array_length(ptr)`
 
-The current design uses hidden allocation headers for MVM-managed arrays so
-dynamic bounds checks can rely on MVM metadata instead of allocator-specific
-layout details.
+`lona-ir` now emits explicit `!lona.alloc.type` metadata on managed
+allocations. MVM treats that metadata as mandatory, rewrites allocation calls
+to internal typed helpers, and derives object size, alignment, and pointer-slot
+layout from the resolved LLVM type instead of trusting source-level size or
+alignment arguments.
 
 At the source-library level, MVM also treats these as different pointer
 surfaces: single-object allocation stays `T*`, while array allocation is
 modeled as `T[*]`.
 
-Array element size is intentionally not queryable at runtime in this ABI.
-Managed code already knows the element type statically, so MVM only keeps the
-metadata needed for bounds checks.
+Managed code already knows the element type statically, so runtime allocation
+APIs no longer accept user-supplied size, element-size, or alignment values
+that could conflict with `alloc type` metadata.
 
 What is implemented now:
 

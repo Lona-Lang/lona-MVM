@@ -161,10 +161,8 @@ points instead of letting user code call arbitrary libc allocators directly.
 
 Recommended v0 surface:
 
-- `__mvm_malloc(size, alignment)`
-- `__mvm_array_malloc(element_size, element_count, alignment)`
-- `__mvm_free(ptr)`
-- `__mvm_array_free(ptr)`
+- `__mvm_malloc()`
+- `__mvm_array_malloc(element_count)`
 - `__mvm_array_length(ptr)`
 
 Design intent:
@@ -175,6 +173,8 @@ Design intent:
 - managed code receives the payload pointer, not the header pointer
 - runtime metadata layout must not depend on a particular system malloc
   implementation
+- `lona-ir` should attach explicit alloc-type metadata so MVM can derive size,
+  alignment, and pointer-slot layout without guessing from later IR uses
 
 For dynamic arrays, `__mvm_array_malloc` should allocate:
 

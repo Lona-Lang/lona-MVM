@@ -1,8 +1,8 @@
 #[extern "C"]
-def __mvm_array_malloc(element_size usize, element_count usize, alignment usize) u8[*]
+def __mvm_array_malloc[T](element_count usize) T[*]
 
 def main() i32 {
-    var values = __mvm_array_malloc(sizeof[u8](), 4_usize, 1_usize)
+    var values = __mvm_array_malloc[u8](4_usize)
     var raw = &values(0)
     if raw == null {
         ret 1

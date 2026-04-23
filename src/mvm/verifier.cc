@@ -115,9 +115,15 @@ llvm::Error ManagedVerifier::verify(const llvm::Module &module,
                             recordViolation(
                                 instruction,
                                 "managed code must use the mvm allocation ABI "
-                                "(`__mvm_malloc`, `__mvm_array_malloc`, "
-                                "`__mvm_free`, `__mvm_array_free`) instead of "
-                                "raw libc allocators",
+                                "(`__mvm_malloc`, `__mvm_array_malloc`) "
+                                "instead of raw libc allocators",
+                                violations);
+                        } else if (name == "__mvm_free" ||
+                                   name == "__mvm_array_free") {
+                            recordViolation(
+                                instruction,
+                                "managed GC is automatic; explicit __mvm_free "
+                                "and __mvm_array_free calls are forbidden",
                                 violations);
                         }
                     }
