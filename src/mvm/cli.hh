@@ -2,6 +2,7 @@
 
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,7 @@ struct Options {
     bool showHelp = false;
     bool dumpIR = false;
     int optLevel = 2;
+    std::uint64_t heapSizeBytes = 8 * 1024 * 1024;
     std::string inputPath;
     std::string entrySymbol;
     std::vector<std::string> programArgs;

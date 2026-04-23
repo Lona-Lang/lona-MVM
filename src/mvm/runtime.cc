@@ -89,6 +89,7 @@ llvm::Expected<int> runManagedProgram(const Options &options) {
         return std::move(error);
     }
 
+    configureManagedHeapLimit(options.heapSizeBytes);
     RuntimeThreads runtimeThreads;
     installRuntimeThreads(runtimeThreads);
 
@@ -107,7 +108,7 @@ llvm::Expected<int> runManagedProgram(const Options &options) {
             installGCStackMapRegistry(executor->getStackMaps());
             registerMutatorThread();
             clearGCRequest();
-            resetGCAllocationBudget();
+            resetManagedHeapUsage();
             clearLastRootScanSummary();
             clearLastGCCollectionStats();
             auto exitCodeOrErr = executor->invoke(entry, argv0, args);

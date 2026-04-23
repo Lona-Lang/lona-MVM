@@ -21,6 +21,7 @@ int main(int argc, char **argv) {
 
     mvm::Options options;
     options.optLevel = 1;
+    options.heapSizeBytes = 4 * 1024;
     options.inputPath = argv[1];
 
     auto exitCodeOrErr = mvm::runManagedProgram(options);

@@ -108,7 +108,6 @@ void RuntimeThreads::vmThreadMain(std::stop_token stopToken) {
         (void)collectionStats;
 
         clearGCRequest();
-        resetGCAllocationBudget();
         gcPending_ = false;
         pendingRootSummary_ = {};
         ++gcCycleEpoch_;

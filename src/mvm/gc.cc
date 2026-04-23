@@ -40,7 +40,7 @@ constexpr std::uint16_t kX86_64RBPDwarfRegister = 6;
 constexpr std::uint16_t kX86_64RSPDwarfRegister = 7;
 constexpr std::size_t kStackMapHeaderSize = 16;
 constexpr std::size_t kStackMapFunctionRecordSize = 24;
-constexpr std::uint64_t kDefaultGCAllocationThresholdBytes = 4096;
+constexpr std::uint64_t kDefaultManagedHeapLimitBytes = 8 * 1024 * 1024;
 
 struct FunctionGCInfo {
     unsigned statepointCount = 0;
@@ -49,7 +49,8 @@ struct FunctionGCInfo {
 };
 
 std::atomic<bool> gcRequested{false};
-std::atomic<std::uint64_t> gcAllocatedBytes{0};
+std::atomic<std::uint64_t> gcTrackedHeapBytes{0};
+std::atomic<std::uint64_t> gcHeapLimitBytes{kDefaultManagedHeapLimitBytes};
 
 std::mutex installedStackMapRegistryMutex;
 std::shared_ptr<GCStackMapRegistry> installedStackMapRegistry;
@@ -204,6 +205,7 @@ llvm::Error prepareManagedGCModule(llvm::Module &module) {
             continue;
         }
         function.setGC(kManagedGCStrategy);
+        function.addFnAttr("frame-pointer", "all");
         hasManagedFunctions = true;
     }
 
@@ -397,7 +399,6 @@ void rememberCurrentRuntimeSafepointOrFatal(std::uintptr_t *runtimeFrame) {
 
     rememberLastRootScanSummary(*summaryOrErr);
     clearGCRequest();
-    resetGCAllocationBudget();
 }
 
 llvm::Expected<std::uint64_t> readStackMapConstant(
@@ -799,18 +800,26 @@ llvm::Expected<GCRootScanSummary> GCStackMapRegistry::scanCurrentSafepoint(
     std::uintptr_t callerBP) const {
     std::lock_guard lock(mutex_);
 
-    auto it = std::find_if(safepoints_.begin(), safepoints_.end(),
-                           [returnAddress](const SafepointRecord &record) {
-                               return record.instructionAddress == returnAddress;
-                           });
-    if (it == safepoints_.end()) {
+    auto findSafepointRecord =
+        [this](std::uintptr_t address) -> const SafepointRecord * {
+        auto it = std::find_if(safepoints_.begin(), safepoints_.end(),
+                               [address](const SafepointRecord &record) {
+                                   return record.instructionAddress == address;
+                               });
+        if (it == safepoints_.end()) {
+            return nullptr;
+        }
+        return &*it;
+    };
+
+    auto makeMissingSafepointMessage = [this](std::uintptr_t address) {
         std::uintptr_t nearestAddress = 0;
         std::uintptr_t nearestDistance = 0;
         bool haveNearest = false;
         for (const auto &record : safepoints_) {
-            auto distance = record.instructionAddress > returnAddress
-                                ? record.instructionAddress - returnAddress
-                                : returnAddress - record.instructionAddress;
+            auto distance = record.instructionAddress > address
+                                ? record.instructionAddress - address
+                                : address - record.instructionAddress;
             if (!haveNearest || distance < nearestDistance) {
                 haveNearest = true;
                 nearestAddress = record.instructionAddress;
@@ -820,40 +829,91 @@ llvm::Expected<GCRootScanSummary> GCStackMapRegistry::scanCurrentSafepoint(
 
         std::string message =
             "no precise GC stackmap entry matched safepoint return address `" +
-            std::to_string(returnAddress) + "`";
+            std::to_string(address) + "`";
         if (haveNearest) {
             message += ", nearest registered safepoint was `" +
                        std::to_string(nearestAddress) + "` (distance `" +
                        std::to_string(nearestDistance) + "`)";
         }
         message += "\n";
-        return makeError(message);
+        return message;
+    };
+
+    auto scanSingleManagedFrame =
+        [](const SafepointRecord &record, std::uintptr_t frameSP,
+           std::uintptr_t frameBP,
+           GCRootScanSummary &summary) -> llvm::Error {
+        if (summary.safepointAddress == 0) {
+            summary.safepointAddress = record.instructionAddress;
+        }
+        summary.rootPairCount += record.rootPairs.size();
+        summary.rootLocationCount += record.rootPairs.size() * 2;
+
+        for (const auto &pair : record.rootPairs) {
+            auto baseOrErr = resolveRootValue(pair.base, frameSP, frameBP);
+            if (!baseOrErr) {
+                return baseOrErr.takeError();
+            }
+            if (*baseOrErr != 0) {
+                ++summary.nonNullRootCount;
+                summary.rootValues.push_back(*baseOrErr);
+            }
+
+            auto derivedOrErr = resolveRootValue(pair.derived, frameSP, frameBP);
+            if (!derivedOrErr) {
+                return derivedOrErr.takeError();
+            }
+            if (*derivedOrErr != 0) {
+                ++summary.nonNullRootCount;
+                summary.rootValues.push_back(*derivedOrErr);
+            }
+        }
+
+        return llvm::Error::success();
+    };
+
+    auto *record = findSafepointRecord(returnAddress);
+    if (!record) {
+        return makeError(makeMissingSafepointMessage(returnAddress));
     }
 
     GCRootScanSummary summary;
-    summary.safepointAddress = it->instructionAddress;
-    summary.rootPairCount = it->rootPairs.size();
-    summary.rootLocationCount = it->rootPairs.size() * 2;
-    summary.rootValues.reserve(summary.rootLocationCount);
+    summary.rootValues.reserve(32);
+    if (auto error = scanSingleManagedFrame(*record, callerSP, callerBP, summary)) {
+        return std::move(error);
+    }
 
-    for (const auto &pair : it->rootPairs) {
-        auto baseOrErr = resolveRootValue(pair.base, callerSP, callerBP);
-        if (!baseOrErr) {
-            return baseOrErr.takeError();
-        }
-        if (*baseOrErr != 0) {
-            ++summary.nonNullRootCount;
-            summary.rootValues.push_back(*baseOrErr);
+    std::uintptr_t framePointer = callerBP;
+    std::size_t walkedFrames = 0;
+    constexpr std::size_t kMaxManagedFrameDepth = 256;
+    while (framePointer != 0 && walkedFrames < kMaxManagedFrameDepth) {
+        std::uintptr_t nextFramePointer = 0;
+        std::uintptr_t nextReturnAddress = 0;
+        std::memcpy(&nextFramePointer, reinterpret_cast<const void *>(framePointer),
+                    sizeof(nextFramePointer));
+        std::memcpy(&nextReturnAddress,
+                    reinterpret_cast<const void *>(framePointer +
+                                                   sizeof(std::uintptr_t)),
+                    sizeof(nextReturnAddress));
+
+        if (nextReturnAddress == 0) {
+            break;
         }
 
-        auto derivedOrErr = resolveRootValue(pair.derived, callerSP, callerBP);
-        if (!derivedOrErr) {
-            return derivedOrErr.takeError();
+        auto *callerRecord = findSafepointRecord(nextReturnAddress);
+        if (!callerRecord) {
+            break;
         }
-        if (*derivedOrErr != 0) {
-            ++summary.nonNullRootCount;
-            summary.rootValues.push_back(*derivedOrErr);
+
+        auto nextCallerSP = framePointer + (2 * sizeof(std::uintptr_t));
+        if (auto error =
+                scanSingleManagedFrame(*callerRecord, nextCallerSP, nextFramePointer,
+                                       summary)) {
+            return std::move(error);
         }
+
+        framePointer = nextFramePointer;
+        ++walkedFrames;
     }
 
     return summary;
@@ -900,14 +960,22 @@ void recordManagedAllocation(std::uint64_t bytes) {
     }
 
     auto total =
-        gcAllocatedBytes.fetch_add(bytes, std::memory_order_acq_rel) + bytes;
-    if (total >= kDefaultGCAllocationThresholdBytes) {
+        gcTrackedHeapBytes.fetch_add(bytes, std::memory_order_acq_rel) + bytes;
+    if (total >= gcHeapLimitBytes.load(std::memory_order_acquire)) {
         requestGC();
     }
 }
 
-void resetGCAllocationBudget() {
-    gcAllocatedBytes.store(0, std::memory_order_release);
+void updateManagedHeapUsage(std::uint64_t bytes) {
+    gcTrackedHeapBytes.store(bytes, std::memory_order_release);
+}
+
+void resetManagedHeapUsage() {
+    updateManagedHeapUsage(0);
+}
+
+void configureManagedHeapLimit(std::uint64_t bytes) {
+    gcHeapLimitBytes.store(bytes, std::memory_order_release);
 }
 
 void requestGC() {

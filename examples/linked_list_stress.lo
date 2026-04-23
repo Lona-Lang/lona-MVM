@@ -1,9 +1,6 @@
 #[extern "C"]
 def __mvm_malloc[T]() T*
 
-#[extern "C"]
-def __mvm_request_gc()
-
 struct Label {
     set code usize
     set bias i32
@@ -98,7 +95,7 @@ def main() i32 {
     var seed usize = 7_usize
     var iteration usize = 0_usize
 
-    for iteration < 48_usize {
+    for iteration < 512_usize {
         seed = next_seed(seed)
 
         {
@@ -144,14 +141,8 @@ def main() i32 {
             }
         }
 
-        if iteration % 6_usize == 0_usize {
-            __mvm_request_gc()
-        }
-
         iteration += 1_usize
     }
-
-    __mvm_request_gc()
 
     var cursor = head
     var count usize = 0_usize

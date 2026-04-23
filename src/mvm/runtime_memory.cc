@@ -282,6 +282,9 @@ GCCollectionStats collectManagedHeap(const std::vector<std::uintptr_t> &roots) {
     GCCollectionStats stats;
     stats.collectionCount = ++collectionCount;
     stats.heapObjectCountBefore = allocationRegistry.size();
+    for (auto &[_, record] : allocationRegistry) {
+        stats.heapBytesBefore += record.payloadSize;
+    }
 
     std::vector<std::uintptr_t> worklist;
     worklist.reserve(roots.size());
@@ -309,6 +312,7 @@ GCCollectionStats collectManagedHeap(const std::vector<std::uintptr_t> &roots) {
     for (auto &[payloadAddress, record] : allocationRegistry) {
         if (record.marked) {
             ++stats.liveObjectCount;
+            stats.heapBytesAfter += record.payloadSize;
             record.marked = false;
             continue;
         }
@@ -325,6 +329,7 @@ GCCollectionStats collectManagedHeap(const std::vector<std::uintptr_t> &roots) {
 
     stats.heapObjectCountAfter = allocationRegistry.size();
     lastCollectionStats = stats;
+    mvm::updateManagedHeapUsage(stats.heapBytesAfter);
     return stats;
 }
 

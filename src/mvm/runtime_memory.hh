@@ -20,6 +20,8 @@ struct GCCollectionStats {
     std::size_t liveObjectCount = 0;
     std::size_t sweptObjectCount = 0;
     std::uint64_t sweptBytes = 0;
+    std::uint64_t heapBytesBefore = 0;
+    std::uint64_t heapBytesAfter = 0;
     std::size_t heapObjectCountBefore = 0;
     std::size_t heapObjectCountAfter = 0;
 };

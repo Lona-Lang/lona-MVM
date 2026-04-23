@@ -88,7 +88,9 @@ llvm::Error runManagedGCPasses(llvm::Module &module,
                                llvm::ModuleAnalysisManager &moduleAnalysisManager);
 
 void recordManagedAllocation(std::uint64_t bytes);
-void resetGCAllocationBudget();
+void updateManagedHeapUsage(std::uint64_t bytes);
+void resetManagedHeapUsage();
+void configureManagedHeapLimit(std::uint64_t bytes);
 void requestGC();
 void clearGCRequest();
 bool isGCRequested();

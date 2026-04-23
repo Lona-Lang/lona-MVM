@@ -90,6 +90,7 @@ test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(GC_ROOT_SCAN_TEST_TARGET) $(GC_C
 	$(GC_COLLECT_TEST_TARGET) $(GC_COLLECT_GARBAGE_BC)
 	$(GC_STRUCT_LAYOUT_TEST_TARGET) $(GC_STRUCT_REACHABILITY_BC)
 	$(GC_COLLECT_TEST_TARGET) $(LINKED_LIST_STRESS_BC)
+	$(TARGET) -Xm8K $(LINKED_LIST_STRESS_BC)
 	$(TARGET) --dump-ir $(EXAMPLE_BC) | rg 'llvm\.experimental\.gc\.statepoint|gc "statepoint-example"'
 	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'mvm\.managed\.signature|arg0=array'
 	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'ptr addrspace\(1\)|llvm\.experimental\.gc\.relocate\.p1'
