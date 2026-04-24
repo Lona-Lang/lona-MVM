@@ -1,6 +1,7 @@
 #include "mvm/heap_layout.hh"
 
 #include "mvm/error.hh"
+#include "mvm/runtime_memory.hh"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
@@ -277,7 +278,7 @@ private:
                 llvm::ConstantArray::get(offsetArrayType, offsetConstants);
             auto *offsetGlobal = new llvm::GlobalVariable(
                 module_, offsetArrayType, true, llvm::GlobalValue::PrivateLinkage,
-                offsetArray, "__mvm_layout_offsets." + std::to_string(nextId_++));
+                offsetArray, "__mvm_type_offsets." + std::to_string(nextId_++));
             offsetGlobal->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
             offsetGlobal->setAlignment(llvm::Align(8));
 
@@ -291,19 +292,21 @@ private:
         }
 
         auto descriptorAlign = module_.getDataLayout().getABITypeAlign(&type);
-        auto *descriptorType = llvm::StructType::get(context, {i64, i64, i64, ptr});
-        auto *descriptorValue = llvm::ConstantStruct::get(
-            descriptorType,
-            {
-                llvm::ConstantInt::get(i64, typeSize.getFixedValue()),
-                llvm::ConstantInt::get(i64, descriptorAlign.value()),
-                llvm::ConstantInt::get(i64, offsets.size()),
-                offsetBase,
-            });
+        auto *descriptorType =
+            llvm::StructType::get(context, {i64, i64, i64, i64, ptr});
+        llvm::SmallVector<llvm::Constant *, 5> descriptorFields = {
+            llvm::ConstantInt::get(i64, mvm::kGCTypeDescriptorABIVersion),
+            llvm::ConstantInt::get(i64, typeSize.getFixedValue()),
+            llvm::ConstantInt::get(i64, descriptorAlign.value()),
+            llvm::ConstantInt::get(i64, offsets.size()),
+            offsetBase,
+        };
+        auto *descriptorValue =
+            llvm::ConstantStruct::get(descriptorType, descriptorFields);
 
         auto *descriptorGlobal = new llvm::GlobalVariable(
             module_, descriptorType, true, llvm::GlobalValue::PrivateLinkage,
-            descriptorValue, "__mvm_layout." + std::to_string(nextId_++));
+            descriptorValue, "__mvm_type." + std::to_string(nextId_++));
         descriptorGlobal->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
         descriptorGlobal->setAlignment(llvm::Align(8));
 

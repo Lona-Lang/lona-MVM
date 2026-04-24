@@ -1,0 +1,26 @@
+#[extern "C"]
+def __mvm_malloc[T]() T*
+
+#[extern "C"]
+def __mvm_array_malloc[T](element_count usize) T[*]
+
+#[extern "C"]
+def __mvm_array_length[T](ptr T[*]) usize
+
+def newObject[T]() T* {
+    ret __mvm_malloc[T]()
+}
+
+def newArray[T](element_count usize) T[*] {
+    ret __mvm_array_malloc[T](element_count)
+}
+
+def arrayLength[T](ptr T[*]) usize {
+    ret __mvm_array_length[T](ptr)
+}
+
+def freeObject[T](ptr T*) {
+    if ptr == null {
+        ret
+    }
+}

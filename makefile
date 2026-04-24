@@ -6,6 +6,9 @@ LLVM_AS ?= llvm-as-18
 CXX ?= clang++
 OUT_DIR ?= build
 EXPORT_DYNAMIC_FLAGS := -rdynamic
+LONA_MANAGED_INCLUDE := -I$(ROOT)/share/managed
+LONA_NATIVE_INCLUDE := -I$(ROOT)/share/native
+BENCH_OPT_LEVEL ?= 1
 
 BASE_CXXFLAGS := $(shell $(LLVM_CONFIG) --cxxflags)
 LLVM_LD_FLAGS := $(shell $(LLVM_CONFIG) --ldflags --system-libs --libs core orcjit native passes support bitreader executionengine nativecodegen)
@@ -71,17 +74,29 @@ GC_STRUCT_REACHABILITY_LO := $(ROOT)/examples/gc_struct_reachability.lo
 GC_STRUCT_REACHABILITY_BC := $(OUT_DIR)/examples/gc_struct_reachability.bc
 LINKED_LIST_STRESS_LO := $(ROOT)/examples/linked_list_stress.lo
 LINKED_LIST_STRESS_BC := $(OUT_DIR)/examples/linked_list_stress.bc
+LINKED_LIST_STRESS_NATIVE_OBJ := $(OUT_DIR)/examples/linked_list_stress_native.o
+HOSTED_ENTRY_OBJ := $(OUT_DIR)/examples/lona_hosted_entry.o
+LINKED_LIST_STRESS_NATIVE_EXE := $(OUT_DIR)/examples/linked_list_stress_native
+LINKED_LIST_BENCH_LO := $(ROOT)/examples/linked_list_bench.lo
+LINKED_LIST_BENCH_BC := $(OUT_DIR)/examples/linked_list_bench.bc
+LINKED_LIST_BENCH_NATIVE_OBJ := $(OUT_DIR)/examples/linked_list_bench_native.o
+LINKED_LIST_BENCH_NATIVE_EXE := $(OUT_DIR)/examples/linked_list_bench_native
 
-.PHONY: all clean test ir-demo
+.PHONY: all clean test ir-demo bench-linked-list bench-linked-list-build
 
 all: $(TARGET)
 
 ir-demo: $(TARGET) $(IR_PIPELINE_DEMO_RAW_LL) $(IR_PIPELINE_DEMO_AFTER_LL)
 
+bench-linked-list: scripts/bench-linked-list.sh
+	$<
+
+bench-linked-list-build: $(TARGET) $(LINKED_LIST_BENCH_BC) $(LINKED_LIST_BENCH_NATIVE_EXE)
+
 test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(GC_ROOT_SCAN_TEST_TARGET) $(GC_COLLECT_TEST_TARGET) $(GC_STRUCT_LAYOUT_TEST_TARGET) $(EXAMPLE_BC) \
 	$(STATIC_ARRAY_OK_BC) $(STATIC_ARRAY_OOB_BC) $(NO_DEBUG_BC) \
 	$(INVALID_BC) $(RUNTIME_ARRAY_API_BC) $(RUNTIME_ARRAY_API_MBC) \
-	$(RUNTIME_ARRAY_OOB_BC) $(GC_ROOT_SCAN_BC) $(GC_AUTO_TRIGGER_BC) $(GC_COLLECT_GARBAGE_BC) $(GC_STRUCT_REACHABILITY_BC) $(LINKED_LIST_STRESS_BC) \
+	$(RUNTIME_ARRAY_OOB_BC) $(GC_ROOT_SCAN_BC) $(GC_AUTO_TRIGGER_BC) $(GC_COLLECT_GARBAGE_BC) $(GC_STRUCT_REACHABILITY_BC) $(LINKED_LIST_STRESS_BC) $(LINKED_LIST_STRESS_NATIVE_EXE) \
 	$(RUNTIME_ARGV_BC) $(MANAGED_STATE_BC) $(MANAGED_DISPATCH_BC) \
 	$(INVALID_RAW_MALLOC_BC) $(INVALID_ELEMENT_ADDRESS_STDERR)
 	$(RUNTIME_MEMORY_TEST_TARGET)
@@ -89,9 +104,9 @@ test: $(TARGET) $(RUNTIME_MEMORY_TEST_TARGET) $(GC_ROOT_SCAN_TEST_TARGET) $(GC_C
 	$(GC_ROOT_SCAN_TEST_TARGET) $(GC_AUTO_TRIGGER_BC)
 	$(GC_COLLECT_TEST_TARGET) $(GC_COLLECT_GARBAGE_BC)
 	$(GC_STRUCT_LAYOUT_TEST_TARGET) $(GC_STRUCT_REACHABILITY_BC)
-	$(GC_COLLECT_TEST_TARGET) $(LINKED_LIST_STRESS_BC)
 	$(TARGET) -Xm8K $(LINKED_LIST_STRESS_BC)
-	$(TARGET) --dump-ir $(EXAMPLE_BC) | rg 'llvm\.experimental\.gc\.statepoint|gc "statepoint-example"'
+	$(LINKED_LIST_STRESS_NATIVE_EXE)
+	$(TARGET) --dump-ir $(GC_AUTO_TRIGGER_BC) | rg 'llvm\.experimental\.gc\.statepoint|gc "statepoint-example"'
 	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'mvm\.managed\.signature|arg0=array'
 	$(TARGET) -O1 --dump-ir $(MANAGED_STATE_BC) | rg 'ptr addrspace\(1\)|llvm\.experimental\.gc\.relocate\.p1'
 	$(TARGET) -O1 --dump-ir $(MANAGED_DISPATCH_BC) | rg 'declare !mvm\.managed\.signature .*@__mvm_malloc_typed\(ptr\)|ptr addrspace\(1\) @llvm\.experimental\.gc\.result\.p1'
@@ -225,7 +240,33 @@ $(GC_STRUCT_REACHABILITY_BC): $(GC_STRUCT_REACHABILITY_LO) makefile
 
 $(LINKED_LIST_STRESS_BC): $(LINKED_LIST_STRESS_LO) makefile
 	mkdir -p $(dir $@)
-	$(LONA_IR) --emit mbc --verify-ir -g $< $@
+	$(LONA_IR) $(LONA_MANAGED_INCLUDE) --emit mbc --verify-ir -g $< $@
+
+$(LINKED_LIST_STRESS_NATIVE_OBJ): $(LINKED_LIST_STRESS_LO) makefile
+	mkdir -p $(dir $@)
+	$(LONA_IR) $(LONA_NATIVE_INCLUDE) --emit linked-obj \
+		--target x86_64-unknown-linux-gnu --verify-ir -g -O1 $< $@
+
+$(HOSTED_ENTRY_OBJ): makefile
+	mkdir -p $(dir $@)
+	$(LONA_IR) --emit entry --target x86_64-unknown-linux-gnu $@
+
+$(LINKED_LIST_STRESS_NATIVE_EXE): $(LINKED_LIST_STRESS_NATIVE_OBJ) $(HOSTED_ENTRY_OBJ)
+	mkdir -p $(dir $@)
+	$(CLANG) $^ -o $@
+
+$(LINKED_LIST_BENCH_BC): $(LINKED_LIST_BENCH_LO) makefile
+	mkdir -p $(dir $@)
+	$(LONA_IR) $(LONA_MANAGED_INCLUDE) --emit mbc --verify-ir -g -O$(BENCH_OPT_LEVEL) $< $@
+
+$(LINKED_LIST_BENCH_NATIVE_OBJ): $(LINKED_LIST_BENCH_LO) makefile
+	mkdir -p $(dir $@)
+	$(LONA_IR) $(LONA_NATIVE_INCLUDE) --emit linked-obj \
+		--target x86_64-unknown-linux-gnu --verify-ir -g -O$(BENCH_OPT_LEVEL) $< $@
+
+$(LINKED_LIST_BENCH_NATIVE_EXE): $(LINKED_LIST_BENCH_NATIVE_OBJ) $(HOSTED_ENTRY_OBJ)
+	mkdir -p $(dir $@)
+	$(CLANG) $^ -o $@
 
 $(IR_PIPELINE_DEMO_AFTER_LL): $(IR_PIPELINE_DEMO_BC) $(TARGET)
 	mkdir -p $(dir $@)

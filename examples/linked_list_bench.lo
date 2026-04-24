@@ -127,13 +127,13 @@ def advance(head Node*, steps usize) Node* {
     ret cursor
 }
 
-def run_stress() i32 {
+def run_bench() i32 {
     var head Node* = null
     var live_count usize = 0_usize
     var seed usize = 7_usize
     var iteration usize = 0_usize
 
-    for iteration < 512_usize {
+    for iteration < 131072_usize {
         seed = next_seed(seed)
 
         {
@@ -223,4 +223,4 @@ def run_stress() i32 {
     ret 0
 }
 
-ret run_stress()
+ret run_bench()

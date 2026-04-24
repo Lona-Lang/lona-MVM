@@ -5,6 +5,8 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -18,13 +20,17 @@
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Object/StackMapParser.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Transforms/Scalar/PlaceSafepoints.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/Transforms/Scalar/RewriteStatepointsForGC.h"
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -41,6 +47,9 @@ constexpr std::uint16_t kX86_64RSPDwarfRegister = 7;
 constexpr std::size_t kStackMapHeaderSize = 16;
 constexpr std::size_t kStackMapFunctionRecordSize = 24;
 constexpr std::uint64_t kDefaultManagedHeapLimitBytes = 8 * 1024 * 1024;
+constexpr llvm::StringLiteral kGCLeafFunctionAttrName = "gc-leaf-function";
+constexpr llvm::StringLiteral kStatepointIDAttrName = "statepoint-id";
+constexpr std::uint64_t kFirstMVMStatepointID = 1;
 
 struct FunctionGCInfo {
     unsigned statepointCount = 0;
@@ -60,11 +69,19 @@ GCRootScanSummary lastRootScanSummary;
 
 thread_local bool currentThreadIsMutator = false;
 
+bool gcDebugEnabled() {
+    static bool enabled = [] {
+        auto *value = std::getenv("MVM_DEBUG_GC");
+        return value && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
 bool shouldAttachManagedGC(const llvm::Function &function) {
     if (function.isDeclaration() || function.isIntrinsic()) {
         return false;
     }
-    return function.getName() != kSafepointPollFunctionName;
+    return !function.hasFnAttribute(kGCLeafFunctionAttrName);
 }
 
 bool isManagedGCFunction(const llvm::Function &function) {
@@ -138,8 +155,155 @@ std::string describeStatepointTarget(const llvm::CallBase &call) {
 }
 
 bool isSafepointPollStatepoint(const llvm::CallBase &call) {
-    return describeStatepointTarget(call) == kRuntimeSafepointPollSymbol ||
-           describeStatepointTarget(call) == kSafepointPollFunctionName;
+    return describeStatepointTarget(call) == kRuntimeSafepointPollSymbol;
+}
+
+bool isExplicitRuntimeSafepointFunctionName(llvm::StringRef name) {
+    return name == kRuntimeSafepointPollSymbol || name == "__mvm_request_gc";
+}
+
+bool isKnownRuntimeGCLeafFunctionName(llvm::StringRef name) {
+    return name == "__mvm_malloc" || name == "__mvm_malloc_typed" ||
+           name == "__mvm_array_malloc" || name == "__mvm_array_malloc_typed" ||
+           name == "__mvm_array_length";
+}
+
+bool isRuntimeAllocationFunctionName(llvm::StringRef name) {
+    return name == "__mvm_malloc" || name == "__mvm_malloc_typed" ||
+           name == "__mvm_array_malloc" || name == "__mvm_array_malloc_typed";
+}
+
+bool isRuntimeAllocationCall(const llvm::CallBase &call) {
+    auto *callee = call.getCalledFunction();
+    return callee && isRuntimeAllocationFunctionName(callee->getName());
+}
+
+bool functionHasLoop(llvm::Function &function) {
+    if (function.empty()) {
+        return false;
+    }
+
+    llvm::DominatorTree dominatorTree(function);
+    llvm::LoopInfo loopInfo(dominatorTree);
+    return !loopInfo.empty();
+}
+
+bool callCanRemainLeaf(const llvm::CallBase &call,
+                       const llvm::SmallPtrSetImpl<const llvm::Function *> &leafFunctions) {
+    if (call.isInlineAsm()) {
+        return false;
+    }
+
+    auto *callee = call.getCalledFunction();
+    if (!callee) {
+        return false;
+    }
+
+    if (callee->isIntrinsic()) {
+        return true;
+    }
+
+    if (isExplicitRuntimeSafepointFunctionName(callee->getName())) {
+        return false;
+    }
+
+    return callee->hasFnAttribute(kGCLeafFunctionAttrName) ||
+           leafFunctions.contains(callee);
+}
+
+void markKnownRuntimeGCLeafFunctions(llvm::Module &module) {
+    for (auto &function : module) {
+        if (isKnownRuntimeGCLeafFunctionName(function.getName())) {
+            function.addFnAttr(kGCLeafFunctionAttrName);
+        }
+    }
+}
+
+void inferManagedGCLeafFunctions(llvm::Module &module) {
+    markKnownRuntimeGCLeafFunctions(module);
+
+    llvm::SmallPtrSet<const llvm::Function *, 32> leafFunctions;
+    for (auto &function : module) {
+        if (function.hasFnAttribute(kGCLeafFunctionAttrName)) {
+            leafFunctions.insert(&function);
+        }
+    }
+
+    bool changed = false;
+    do {
+        changed = false;
+        for (auto &function : module) {
+            if (function.isDeclaration() || function.isIntrinsic() ||
+                function.hasFnAttribute(kGCLeafFunctionAttrName)) {
+                continue;
+            }
+
+            if (functionHasLoop(function)) {
+                continue;
+            }
+
+            bool canRemainLeaf = true;
+            for (auto &block : function) {
+                for (auto &instruction : block) {
+                    auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    if (!call) {
+                        continue;
+                    }
+                    if (isRuntimeAllocationCall(*call)) {
+                        canRemainLeaf = false;
+                        break;
+                    }
+                    if (!callCanRemainLeaf(*call, leafFunctions)) {
+                        canRemainLeaf = false;
+                        break;
+                    }
+                }
+                if (!canRemainLeaf) {
+                    break;
+                }
+            }
+
+            if (!canRemainLeaf) {
+                continue;
+            }
+
+            function.addFnAttr(kGCLeafFunctionAttrName);
+            leafFunctions.insert(&function);
+            changed = true;
+        }
+    } while (changed);
+}
+
+llvm::Error prepareManagedGCModule(llvm::Module &module) {
+    inferManagedGCLeafFunctions(module);
+
+    bool hasManagedFunctions = false;
+    for (auto &function : module) {
+        if (!shouldAttachManagedGC(function)) {
+            continue;
+        }
+        function.setGC(kManagedGCStrategy);
+        function.addFnAttr("frame-pointer", "all");
+        hasManagedFunctions = true;
+    }
+
+    clearNamedMetadata(module, kManagedGCModuleMetadataName);
+    clearNamedMetadata(module, kManagedGCFunctionMetadataName);
+
+    if (!hasManagedFunctions) {
+        return llvm::Error::success();
+    }
+
+    auto &context = module.getContext();
+    auto *i64 = llvm::Type::getInt64Ty(context);
+    auto *pollType = llvm::FunctionType::get(llvm::Type::getVoidTy(context), {i64}, false);
+    auto runtimeCallee =
+        module.getOrInsertFunction(kRuntimeSafepointPollSymbol, pollType);
+    auto *runtimePoll = llvm::cast<llvm::Function>(runtimeCallee.getCallee());
+    runtimePoll->setCallingConv(llvm::CallingConv::C);
+    runtimePoll->addFnAttr(llvm::Attribute::NoInline);
+    runtimePoll->addFnAttr("frame-pointer", "all");
+    return llvm::Error::success();
 }
 
 llvm::Expected<unsigned> getRelocateIndex(const llvm::CallBase &call,
@@ -158,70 +322,94 @@ llvm::Expected<unsigned> getRelocateIndex(const llvm::CallBase &call,
     return static_cast<unsigned>(constant->getZExtValue());
 }
 
-llvm::Expected<llvm::Function *> getOrCreateSafepointPoll(llvm::Module &module) {
-    auto &context = module.getContext();
-    auto *pollType = llvm::FunctionType::get(llvm::Type::getVoidTy(context), false);
-
-    if (auto *existing = module.getFunction(kSafepointPollFunctionName)) {
-        if (existing->getFunctionType() != pollType) {
-            return makeError("managed GC helper `" +
-                             std::string(kSafepointPollFunctionName) +
-                             "` must have signature `void ()`\n");
-        }
-        if (!existing->isDeclaration()) {
-            return existing;
-        }
-    }
-
-    auto runtimeCallee =
-        module.getOrInsertFunction(kRuntimeSafepointPollSymbol, pollType);
-    auto *runtimePoll = llvm::cast<llvm::Function>(runtimeCallee.getCallee());
-
-    llvm::Function *poll = module.getFunction(kSafepointPollFunctionName);
-    if (!poll) {
-        poll = llvm::Function::Create(pollType, llvm::GlobalValue::InternalLinkage,
-                                      kSafepointPollFunctionName, module);
-    }
-
-    poll->setLinkage(llvm::GlobalValue::InternalLinkage);
-    poll->addFnAttr(llvm::Attribute::NoInline);
-    poll->addFnAttr("frame-pointer", "all");
-
-    if (!poll->empty()) {
-        poll->deleteBody();
-    }
-
-    auto *entryBlock = llvm::BasicBlock::Create(context, "entry", poll);
-    llvm::IRBuilder<> builder(entryBlock);
-    builder.CreateCall(runtimePoll);
-    builder.CreateRetVoid();
-    return poll;
+llvm::CallInst *insertManagedSafepointPoll(llvm::Instruction &insertBefore,
+                                           llvm::Function &poll,
+                                           llvm::LLVMContext &context,
+                                           std::uint64_t statepointID) {
+    auto *i64 = llvm::Type::getInt64Ty(context);
+    llvm::IRBuilder<> builder(&insertBefore);
+    builder.SetCurrentDebugLocation(insertBefore.getDebugLoc());
+    auto *call = builder.CreateCall(
+        &poll, {llvm::ConstantInt::get(i64, statepointID)});
+    call->setCallingConv(llvm::CallingConv::C);
+    call->addFnAttr(llvm::Attribute::get(
+        context, kStatepointIDAttrName, std::to_string(statepointID)));
+    return call;
 }
 
-llvm::Error prepareManagedGCModule(llvm::Module &module) {
-    bool hasManagedFunctions = false;
+bool isDirectSafepointPollCall(const llvm::Instruction &instruction) {
+    auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+    if (!call) {
+        return false;
+    }
+
+    auto *callee = call->getCalledFunction();
+    return callee && callee->getName() == kRuntimeSafepointPollSymbol;
+}
+
+llvm::Error insertManagedSafepointPolls(llvm::Module &module) {
+    auto &context = module.getContext();
+    auto *i64 = llvm::Type::getInt64Ty(context);
+    auto *pollType = llvm::FunctionType::get(llvm::Type::getVoidTy(context), {i64}, false);
+    auto runtimeCallee =
+        module.getOrInsertFunction(kRuntimeSafepointPollSymbol, pollType);
+    auto *poll = llvm::cast<llvm::Function>(runtimeCallee.getCallee());
+    std::uint64_t nextStatepointID = kFirstMVMStatepointID;
+
     for (auto &function : module) {
-        if (!shouldAttachManagedGC(function)) {
+        if (!isManagedGCFunction(function) || function.empty()) {
             continue;
         }
-        function.setGC(kManagedGCStrategy);
-        function.addFnAttr("frame-pointer", "all");
-        hasManagedFunctions = true;
+
+        llvm::SmallVector<llvm::CallBase *, 16> allocationCalls;
+        for (auto &block : function) {
+            for (auto &instruction : block) {
+                auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                if (call && isRuntimeAllocationCall(*call)) {
+                    allocationCalls.push_back(call);
+                }
+            }
+        }
+
+        for (auto *call : allocationCalls) {
+            auto *next = call->getNextNode();
+            if (!next || isDirectSafepointPollCall(*next)) {
+                continue;
+            }
+
+            insertManagedSafepointPoll(*next, *poll, context, nextStatepointID++);
+        }
+
+        llvm::DominatorTree dominatorTree(function);
+        llvm::LoopInfo loopInfo(dominatorTree);
+        llvm::SmallVector<llvm::Loop *, 8> worklist;
+        for (auto *loop : loopInfo) {
+            worklist.push_back(loop);
+        }
+        llvm::SmallPtrSet<llvm::BasicBlock *, 16> latchBlocks;
+
+        while (!worklist.empty()) {
+            auto *loop = worklist.pop_back_val();
+            for (auto *subLoop : loop->getSubLoops()) {
+                worklist.push_back(subLoop);
+            }
+
+            llvm::SmallVector<llvm::BasicBlock *, 4> loopLatches;
+            loop->getLoopLatches(loopLatches);
+            latchBlocks.insert(loopLatches.begin(), loopLatches.end());
+        }
+
+        for (auto *latch : latchBlocks) {
+            auto *terminator = latch->getTerminator();
+            if (!terminator) {
+                continue;
+            }
+
+            insertManagedSafepointPoll(*terminator, *poll, context,
+                                       nextStatepointID++);
+        }
     }
 
-    clearNamedMetadata(module, kManagedGCModuleMetadataName);
-    clearNamedMetadata(module, kManagedGCFunctionMetadataName);
-
-    if (!hasManagedFunctions) {
-        return llvm::Error::success();
-    }
-
-    auto pollOrErr = getOrCreateSafepointPoll(module);
-    if (!pollOrErr) {
-        return pollOrErr.takeError();
-    }
-
-    (*pollOrErr)->setCallingConv(llvm::CallingConv::C);
     return llvm::Error::success();
 }
 
@@ -357,7 +545,7 @@ std::shared_ptr<GCStackMapRegistry> getInstalledGCStackMapRegistry() {
 }
 
 llvm::Expected<GCRootScanSummary> scanCurrentRuntimeSafepointFromFrame(
-    std::uintptr_t *runtimeFrame) {
+    std::uintptr_t *runtimeFrame, std::uint64_t statepointID) {
     if (!currentThreadIsMutator) {
         return makeError("precise GC root scan requires execution on a registered "
                          "mutator thread\n");
@@ -379,6 +567,9 @@ llvm::Expected<GCRootScanSummary> scanCurrentRuntimeSafepointFromFrame(
     auto callerSP =
         reinterpret_cast<std::uintptr_t>(runtimeFrame) + (2 * sizeof(std::uintptr_t));
     auto callerBP = runtimeFrame[0];
+    if (statepointID != 0) {
+        return registry->scanCurrentSafepointByID(statepointID, callerSP, callerBP);
+    }
     return registry->scanCurrentSafepoint(returnAddress, callerSP, callerBP);
 #else
     return makeError("precise GC root scan is currently implemented only on "
@@ -386,8 +577,10 @@ llvm::Expected<GCRootScanSummary> scanCurrentRuntimeSafepointFromFrame(
 #endif
 }
 
-void rememberCurrentRuntimeSafepointOrFatal(std::uintptr_t *runtimeFrame) {
-    auto summaryOrErr = scanCurrentRuntimeSafepointFromFrame(runtimeFrame);
+void rememberCurrentRuntimeSafepointOrFatal(std::uintptr_t *runtimeFrame,
+                                            std::uint64_t statepointID) {
+    auto summaryOrErr =
+        scanCurrentRuntimeSafepointFromFrame(runtimeFrame, statepointID);
     if (!summaryOrErr) {
         auto message = renderError(summaryOrErr.takeError());
         llvm::report_fatal_error(llvm::StringRef(message));
@@ -567,26 +760,130 @@ llvm::Error runManagedGCPasses(llvm::Module &module,
         return error;
     }
 
-    llvm::ModulePassManager gcPassManager;
-    gcPassManager.addPass(
-        llvm::createModuleToFunctionPassAdaptor(llvm::PlaceSafepointsPass()));
-    gcPassManager.addPass(llvm::RewriteStatepointsForGC());
-    gcPassManager.addPass(llvm::createModuleToFunctionPassAdaptor(
+    if (auto error = insertManagedSafepointPolls(module)) {
+        return error;
+    }
+
+    llvm::ModulePassManager rewritePassManager;
+    rewritePassManager.addPass(llvm::RewriteStatepointsForGC());
+    rewritePassManager.addPass(llvm::createModuleToFunctionPassAdaptor(
         llvm::SafepointIRVerifierPass()));
-    gcPassManager.run(module, moduleAnalysisManager);
+    rewritePassManager.run(module, moduleAnalysisManager);
 
     return annotateManagedGCMetadata(module);
+}
+
+void GCStackMapRegistry::recordManagedFunctionOrder(const llvm::Module &module) {
+    std::vector<std::string> functionOrder;
+    if (auto *metadata = module.getNamedMetadata(kManagedGCFunctionMetadataName)) {
+        functionOrder.reserve(metadata->getNumOperands());
+        for (auto *operand : metadata->operands()) {
+            if (!operand || operand->getNumOperands() == 0) {
+                continue;
+            }
+
+            auto *valueMetadata =
+                llvm::dyn_cast_or_null<llvm::ValueAsMetadata>(
+                    operand->getOperand(0).get());
+            if (!valueMetadata) {
+                continue;
+            }
+
+            auto *function =
+                llvm::dyn_cast<llvm::Function>(valueMetadata->getValue());
+            if (!function) {
+                continue;
+            }
+
+            functionOrder.push_back(function->getName().str());
+        }
+    }
+
+    std::lock_guard lock(mutex_);
+    if (gcDebugEnabled()) {
+        std::fprintf(stderr, "mvm-gc: recorded managed function order=%zu\n",
+                     functionOrder.size());
+        for (std::size_t index = 0; index < functionOrder.size(); ++index) {
+            std::fprintf(stderr, "mvm-gc: managed function[%zu]=%s\n", index,
+                         functionOrder[index].c_str());
+        }
+    }
+    managedFunctionOrder_ = std::move(functionOrder);
 }
 
 llvm::Error GCStackMapRegistry::registerObject(
     const llvm::object::ObjectFile &objectFile,
     const llvm::RuntimeDyld::LoadedObjectInfo &loadedInfo) {
     std::vector<SafepointRecord> loadedSafepoints;
+    std::vector<std::string> managedFunctionOrder;
+    {
+        std::lock_guard lock(mutex_);
+        managedFunctionOrder = managedFunctionOrder_;
+    }
+
     llvm::DenseMap<unsigned, llvm::object::SectionRef> originalSectionsByIndex;
     for (const auto &section : objectFile.sections()) {
         originalSectionsByIndex[static_cast<unsigned>(section.getIndex())] = section;
     }
 
+    struct FunctionSymbolAddress {
+        std::uint64_t objectAddress = 0;
+        std::uintptr_t loadedAddress = 0;
+        std::string name;
+    };
+
+    llvm::StringMap<FunctionSymbolAddress> originalFunctionSymbolsByName;
+    std::vector<FunctionSymbolAddress> functionSymbols;
+    for (const auto &symbol : objectFile.symbols()) {
+        auto typeOrErr = symbol.getType();
+        if (!typeOrErr) {
+            return typeOrErr.takeError();
+        }
+        if (*typeOrErr != llvm::object::SymbolRef::ST_Function) {
+            continue;
+        }
+
+        auto symbolNameOrErr = symbol.getName();
+        if (!symbolNameOrErr) {
+            return symbolNameOrErr.takeError();
+        }
+
+        auto symbolSectionOrErr = symbol.getSection();
+        if (!symbolSectionOrErr) {
+            return symbolSectionOrErr.takeError();
+        }
+        if (*symbolSectionOrErr == objectFile.section_end()) {
+            continue;
+        }
+
+        auto symbolAddressOrErr = symbol.getAddress();
+        if (!symbolAddressOrErr) {
+            return symbolAddressOrErr.takeError();
+        }
+
+        auto sectionIndex = static_cast<unsigned>((*symbolSectionOrErr)->getIndex());
+        auto originalSectionIt = originalSectionsByIndex.find(sectionIndex);
+        if (originalSectionIt == originalSectionsByIndex.end()) {
+            continue;
+        }
+
+        auto objectSectionAddress = (*symbolSectionOrErr)->getAddress();
+        auto loadedSectionAddress =
+            loadedInfo.getSectionLoadAddress(originalSectionIt->second);
+        FunctionSymbolAddress functionSymbol{
+            *symbolAddressOrErr,
+            static_cast<std::uintptr_t>(loadedSectionAddress +
+                                        *symbolAddressOrErr - objectSectionAddress),
+            symbolNameOrErr->str(),
+        };
+        originalFunctionSymbolsByName[functionSymbol.name] = functionSymbol;
+        functionSymbols.push_back(functionSymbol);
+    }
+
+    llvm::sort(functionSymbols, [](const FunctionSymbolAddress &left,
+                                  const FunctionSymbolAddress &right) {
+        return left.objectAddress < right.objectAddress;
+    });
     auto debugObject = loadedInfo.getObjectForDebug(objectFile);
     const auto &stackMapObject = *debugObject.getBinary();
 
@@ -610,6 +907,35 @@ llvm::Error GCStackMapRegistry::registerObject(
             reinterpret_cast<const std::uint8_t *>(contentsOrErr->data()),
             contentsOrErr->size());
 
+        std::vector<llvm::object::RelocationRef> stackMapRelocations;
+        bool usingOriginalStackMapRelocations = false;
+        for (const auto &originalSection : objectFile.sections()) {
+            auto originalNameOrErr = originalSection.getName();
+            if (!originalNameOrErr) {
+                return originalNameOrErr.takeError();
+            }
+            if (*originalNameOrErr != *nameOrErr) {
+                continue;
+            }
+
+            for (const auto &relocation : originalSection.relocations()) {
+                stackMapRelocations.push_back(relocation);
+            }
+            usingOriginalStackMapRelocations = !stackMapRelocations.empty();
+            break;
+        }
+        if (!usingOriginalStackMapRelocations) {
+            for (const auto &relocation : section.relocations()) {
+                stackMapRelocations.push_back(relocation);
+            }
+        }
+        if (gcDebugEnabled()) {
+            std::fprintf(stderr,
+                         "mvm-gc: stackmap relocations=%zu source=%s\n",
+                         stackMapRelocations.size(),
+                         usingOriginalStackMapRelocations ? "object" : "debug");
+        }
+
         if (auto error = StackMapParser::validateHeader(stackMapSection)) {
             return error;
         }
@@ -617,7 +943,7 @@ llvm::Error GCStackMapRegistry::registerObject(
         StackMapParser parser(stackMapSection);
 
         std::vector<std::uintptr_t> relocatedFunctionAddresses(parser.getNumFunctions(), 0);
-        for (const auto &relocation : section.relocations()) {
+        for (const auto &relocation : stackMapRelocations) {
             auto relocationOffset = relocation.getOffset();
             if (relocationOffset < kStackMapHeaderSize) {
                 continue;
@@ -634,13 +960,39 @@ llvm::Error GCStackMapRegistry::registerObject(
             }
 
             auto symbolIt = relocation.getSymbol();
-            if (symbolIt == stackMapObject.symbol_end()) {
+            if (usingOriginalStackMapRelocations) {
+                if (symbolIt == objectFile.symbol_end()) {
+                    return makeError(
+                        "stackmap relocation is missing its target symbol\n");
+                }
+            } else if (symbolIt == stackMapObject.symbol_end()) {
                 return makeError("stackmap relocation is missing its target symbol\n");
             }
 
             auto symbolAddressOrErr = symbolIt->getAddress();
             if (!symbolAddressOrErr) {
                 return symbolAddressOrErr.takeError();
+            }
+            auto symbolNameOrErr = symbolIt->getName();
+            if (!symbolNameOrErr) {
+                return symbolNameOrErr.takeError();
+            }
+            auto symbolNameForDebug = symbolNameOrErr->str();
+
+            auto originalSymbolIt =
+                originalFunctionSymbolsByName.find(symbolNameForDebug);
+            if (originalSymbolIt != originalFunctionSymbolsByName.end()) {
+                relocatedFunctionAddresses[functionIndex] =
+                    originalSymbolIt->second.loadedAddress;
+                if (gcDebugEnabled()) {
+                    std::fprintf(stderr,
+                                 "mvm-gc: stackmap relocation function[%zu] symbol=%s "
+                                 "resolved=%llu\n",
+                                 functionIndex, symbolNameForDebug.c_str(),
+                                 static_cast<unsigned long long>(
+                                     relocatedFunctionAddresses[functionIndex]));
+                }
+                continue;
             }
 
             auto symbolSectionOrErr = symbolIt->getSection();
@@ -667,67 +1019,26 @@ llvm::Error GCStackMapRegistry::registerObject(
                 static_cast<std::uintptr_t>(loadedSectionAddress +
                                             *symbolAddressOrErr -
                                             objectSectionAddress);
-        }
-
-        if (llvm::all_of(relocatedFunctionAddresses,
-                         [](std::uintptr_t address) { return address == 0; })) {
-            struct FunctionSymbolAddress {
-                std::uint64_t objectAddress = 0;
-                std::uintptr_t loadedAddress = 0;
-            };
-
-            std::vector<FunctionSymbolAddress> functionSymbols;
-            for (const auto &symbol : stackMapObject.symbols()) {
-                auto typeOrErr = symbol.getType();
-                if (!typeOrErr) {
-                    return typeOrErr.takeError();
-                }
-                if (*typeOrErr != llvm::object::SymbolRef::ST_Function) {
-                    continue;
-                }
-
-                auto symbolSectionOrErr = symbol.getSection();
-                if (!symbolSectionOrErr) {
-                    return symbolSectionOrErr.takeError();
-                }
-                if (*symbolSectionOrErr == stackMapObject.section_end()) {
-                    continue;
-                }
-
-                auto symbolAddressOrErr = symbol.getAddress();
-                if (!symbolAddressOrErr) {
-                    return symbolAddressOrErr.takeError();
-                }
-
-                auto sectionIndex = static_cast<unsigned>((*symbolSectionOrErr)->getIndex());
-                auto originalSectionIt = originalSectionsByIndex.find(sectionIndex);
-                if (originalSectionIt == originalSectionsByIndex.end()) {
-                    continue;
-                }
-
-                auto objectSectionAddress = (*symbolSectionOrErr)->getAddress();
-                auto loadedSectionAddress =
-                    loadedInfo.getSectionLoadAddress(originalSectionIt->second);
-                functionSymbols.push_back(FunctionSymbolAddress{
-                    *symbolAddressOrErr,
-                    static_cast<std::uintptr_t>(loadedSectionAddress +
-                                                *symbolAddressOrErr -
-                                                objectSectionAddress),
-                });
-            }
-
-            llvm::sort(functionSymbols, [](const FunctionSymbolAddress &left,
-                                          const FunctionSymbolAddress &right) {
-                return left.objectAddress < right.objectAddress;
-            });
-
-            for (std::size_t index = 0;
-                 index < relocatedFunctionAddresses.size() &&
-                 index < functionSymbols.size();
-                 ++index) {
-                relocatedFunctionAddresses[index] = functionSymbols[index].loadedAddress;
+            if (gcDebugEnabled()) {
+                std::fprintf(stderr,
+                             "mvm-gc: stackmap relocation function[%zu] symbol=%s "
+                             "symbol_addr=%llu section_addr=%llu loaded_section=%llu "
+                             "computed=%llu\n",
+                             functionIndex, symbolNameForDebug.c_str(),
+                             static_cast<unsigned long long>(*symbolAddressOrErr),
+                             static_cast<unsigned long long>(objectSectionAddress),
+                             static_cast<unsigned long long>(loadedSectionAddress),
+                             static_cast<unsigned long long>(
+                                 relocatedFunctionAddresses[functionIndex]));
             }
         }
+
+        auto functionSymbolsByLoadedAddress = functionSymbols;
+        llvm::sort(functionSymbolsByLoadedAddress,
+                   [](const FunctionSymbolAddress &left,
+                      const FunctionSymbolAddress &right) {
+                       return left.loadedAddress < right.loadedAddress;
+                   });
 
         std::vector<std::uint64_t> constants;
         constants.reserve(parser.getNumConstants());
@@ -735,14 +1046,61 @@ llvm::Error GCStackMapRegistry::registerObject(
             constants.push_back(constant.getValue());
         }
 
+        auto findFunctionEndAddress =
+            [&functionSymbolsByLoadedAddress](std::uintptr_t functionAddress) {
+                auto it = llvm::upper_bound(
+                    functionSymbolsByLoadedAddress, functionAddress,
+                    [](std::uintptr_t address, const FunctionSymbolAddress &symbol) {
+                        return address < symbol.loadedAddress;
+                    });
+                if (it == functionSymbolsByLoadedAddress.end()) {
+                    return std::numeric_limits<std::uintptr_t>::max();
+                }
+                return it->loadedAddress;
+            };
+
         unsigned nextRecordIndex = 0;
         std::size_t functionIndex = 0;
         for (auto function : parser.functions()) {
             auto functionAddress = function.getFunctionAddress();
+            bool resolvedFunctionAddress = false;
             if (functionIndex < relocatedFunctionAddresses.size() &&
                 relocatedFunctionAddresses[functionIndex] != 0) {
                 functionAddress = relocatedFunctionAddresses[functionIndex];
+                resolvedFunctionAddress = true;
             }
+            if (!resolvedFunctionAddress &&
+                functionIndex < managedFunctionOrder.size()) {
+                auto mappedSymbolIt =
+                    originalFunctionSymbolsByName.find(managedFunctionOrder[functionIndex]);
+                if (mappedSymbolIt != originalFunctionSymbolsByName.end()) {
+                    functionAddress = mappedSymbolIt->second.loadedAddress;
+                    resolvedFunctionAddress = true;
+                    if (gcDebugEnabled()) {
+                        std::fprintf(stderr,
+                                     "mvm-gc: stackmap function[%zu] metadata=%s "
+                                     "resolved=%llu\n",
+                                     functionIndex,
+                                     managedFunctionOrder[functionIndex].c_str(),
+                                     static_cast<unsigned long long>(
+                                         functionAddress));
+                    }
+                }
+            }
+            if (!resolvedFunctionAddress && !functionSymbols.empty()) {
+                auto it = llvm::upper_bound(
+                    functionSymbols, function.getFunctionAddress(),
+                    [](std::uint64_t address, const FunctionSymbolAddress &symbol) {
+                        return address < symbol.objectAddress;
+                    });
+                if (it != functionSymbols.begin()) {
+                    --it;
+                    functionAddress = static_cast<std::uintptr_t>(
+                        it->loadedAddress +
+                        (function.getFunctionAddress() - it->objectAddress));
+                }
+            }
+            auto functionEndAddress = findFunctionEndAddress(functionAddress);
 
             for (std::uint64_t recordIndex = 0; recordIndex < function.getRecordCount();
                  ++recordIndex) {
@@ -756,11 +1114,30 @@ llvm::Error GCStackMapRegistry::registerObject(
                 if (!rootPairsOrErr) {
                     return rootPairsOrErr.takeError();
                 }
-
                 SafepointRecord safepoint;
+                safepoint.id = record.getID();
+                safepoint.functionAddress = functionAddress;
+                safepoint.functionEndAddress = functionEndAddress;
                 safepoint.instructionAddress = static_cast<std::uintptr_t>(
                     functionAddress + record.getInstructionOffset());
                 safepoint.rootPairs = std::move(*rootPairsOrErr);
+                if (gcDebugEnabled()) {
+                    std::fprintf(stderr,
+                                 "mvm-gc: stackmap function[%zu] base=%llu relocated=%llu "
+                                 "record_id=%llu statepoint_id=%llu record_offset=%llu "
+                                 "safepoint=%llu roots=%zu\n",
+                                 functionIndex,
+                                 static_cast<unsigned long long>(
+                                     function.getFunctionAddress()),
+                                 static_cast<unsigned long long>(functionAddress),
+                                 static_cast<unsigned long long>(record.getID()),
+                                 static_cast<unsigned long long>(safepoint.id),
+                                 static_cast<unsigned long long>(
+                                     record.getInstructionOffset()),
+                                 static_cast<unsigned long long>(
+                                     safepoint.instructionAddress),
+                                 safepoint.rootPairs.size());
+                }
                 loadedSafepoints.push_back(std::move(safepoint));
             }
             ++functionIndex;
@@ -795,6 +1172,139 @@ llvm::Error GCStackMapRegistry::takeRegistrationError() {
     return error;
 }
 
+llvm::Expected<GCRootScanSummary> GCStackMapRegistry::scanCurrentSafepointByID(
+    std::uint64_t statepointID, std::uintptr_t callerSP,
+    std::uintptr_t callerBP) const {
+    std::lock_guard lock(mutex_);
+
+    auto findSafepointRecord =
+        [this](std::uintptr_t address) -> const SafepointRecord * {
+        auto it = std::find_if(safepoints_.begin(), safepoints_.end(),
+                               [address](const SafepointRecord &record) {
+                                   return record.instructionAddress == address;
+                               });
+        if (it == safepoints_.end()) {
+            return nullptr;
+        }
+        return &*it;
+    };
+
+    auto findSafepointRecordForReturnAddress =
+        [this](std::uintptr_t address) -> const SafepointRecord * {
+        const SafepointRecord *best = nullptr;
+        std::uintptr_t bestDistance = 0;
+        constexpr std::uintptr_t kMaxReturnAddressDistance = 4096;
+
+        for (const auto &record : safepoints_) {
+            if (record.instructionAddress > address) {
+                continue;
+            }
+
+            auto distance = address - record.instructionAddress;
+            if (!best || distance < bestDistance) {
+                best = &record;
+                bestDistance = distance;
+            }
+        }
+
+        if (best && bestDistance <= kMaxReturnAddressDistance) {
+            return best;
+        }
+
+        return nullptr;
+    };
+
+    auto scanSingleManagedFrame =
+        [](const SafepointRecord &record, std::uintptr_t frameSP,
+           std::uintptr_t frameBP,
+           GCRootScanSummary &summary) -> llvm::Error {
+        if (summary.safepointAddress == 0) {
+            summary.safepointAddress = record.instructionAddress;
+        }
+        summary.rootPairCount += record.rootPairs.size();
+        summary.rootLocationCount += record.rootPairs.size() * 2;
+
+        for (const auto &pair : record.rootPairs) {
+            auto baseOrErr = resolveRootValue(pair.base, frameSP, frameBP);
+            if (!baseOrErr) {
+                return baseOrErr.takeError();
+            }
+            if (*baseOrErr != 0) {
+                ++summary.nonNullRootCount;
+                summary.rootValues.push_back(*baseOrErr);
+            }
+
+            auto derivedOrErr = resolveRootValue(pair.derived, frameSP, frameBP);
+            if (!derivedOrErr) {
+                return derivedOrErr.takeError();
+            }
+            if (*derivedOrErr != 0) {
+                ++summary.nonNullRootCount;
+                summary.rootValues.push_back(*derivedOrErr);
+            }
+        }
+
+        return llvm::Error::success();
+    };
+
+    const SafepointRecord *record = nullptr;
+    for (const auto &candidate : safepoints_) {
+        if (candidate.id == statepointID) {
+            record = &candidate;
+            break;
+        }
+    }
+
+    if (!record) {
+        return makeError("no precise GC stackmap entry matched statepoint id `" +
+                         std::to_string(statepointID) + "`\n");
+    }
+
+    GCRootScanSummary summary;
+    summary.rootValues.reserve(32);
+    if (auto error = scanSingleManagedFrame(*record, callerSP, callerBP, summary)) {
+        return std::move(error);
+    }
+
+    std::uintptr_t framePointer = callerBP;
+    std::size_t walkedFrames = 0;
+    constexpr std::size_t kMaxManagedFrameDepth = 256;
+    while (framePointer != 0 && walkedFrames < kMaxManagedFrameDepth) {
+        std::uintptr_t nextFramePointer = 0;
+        std::uintptr_t nextReturnAddress = 0;
+        std::memcpy(&nextFramePointer, reinterpret_cast<const void *>(framePointer),
+                    sizeof(nextFramePointer));
+        std::memcpy(&nextReturnAddress,
+                    reinterpret_cast<const void *>(framePointer +
+                                                   sizeof(std::uintptr_t)),
+                    sizeof(nextReturnAddress));
+
+        if (nextReturnAddress == 0) {
+            break;
+        }
+
+        auto *callerRecord = findSafepointRecord(nextReturnAddress);
+        if (!callerRecord) {
+            callerRecord = findSafepointRecordForReturnAddress(nextReturnAddress);
+        }
+        if (!callerRecord) {
+            break;
+        }
+
+        auto nextCallerSP = framePointer + (2 * sizeof(std::uintptr_t));
+        if (auto error =
+                scanSingleManagedFrame(*callerRecord, nextCallerSP, nextFramePointer,
+                                       summary)) {
+            return std::move(error);
+        }
+
+        framePointer = nextFramePointer;
+        ++walkedFrames;
+    }
+
+    return summary;
+}
+
 llvm::Expected<GCRootScanSummary> GCStackMapRegistry::scanCurrentSafepoint(
     std::uintptr_t returnAddress, std::uintptr_t callerSP,
     std::uintptr_t callerBP) const {
@@ -810,6 +1320,31 @@ llvm::Expected<GCRootScanSummary> GCStackMapRegistry::scanCurrentSafepoint(
             return nullptr;
         }
         return &*it;
+    };
+
+    auto findSafepointRecordForReturnAddress =
+        [this](std::uintptr_t address) -> const SafepointRecord * {
+        const SafepointRecord *best = nullptr;
+        std::uintptr_t bestDistance = 0;
+        constexpr std::uintptr_t kMaxReturnAddressDistance = 4096;
+
+        for (const auto &record : safepoints_) {
+            if (record.instructionAddress > address) {
+                continue;
+            }
+
+            auto distance = address - record.instructionAddress;
+            if (!best || distance < bestDistance) {
+                best = &record;
+                bestDistance = distance;
+            }
+        }
+
+        if (best && bestDistance <= kMaxReturnAddressDistance) {
+            return best;
+        }
+
+        return nullptr;
     };
 
     auto makeMissingSafepointMessage = [this](std::uintptr_t address) {
@@ -872,18 +1407,92 @@ llvm::Expected<GCRootScanSummary> GCStackMapRegistry::scanCurrentSafepoint(
         return llvm::Error::success();
     };
 
-    auto *record = findSafepointRecord(returnAddress);
+    const SafepointRecord *record = nullptr;
+    std::uintptr_t startFramePointer = callerBP;
+    std::uintptr_t startCallerSP = callerSP;
+    std::uintptr_t probeReturnAddress = returnAddress;
+    std::uintptr_t probeFramePointer = callerBP;
+    std::uintptr_t probeCallerSP = callerSP;
+    constexpr std::size_t kMaxStartFrameProbeDepth = 8;
+
+    for (std::size_t probeDepth = 0; probeDepth < kMaxStartFrameProbeDepth;
+         ++probeDepth) {
+        record = findSafepointRecord(probeReturnAddress);
+        if (!record && probeDepth > 0) {
+            record = findSafepointRecordForReturnAddress(probeReturnAddress);
+        }
+        if (record) {
+            if (gcDebugEnabled()) {
+                std::fprintf(stderr,
+                             "mvm-gc: selected safepoint probe depth=%zu "
+                             "return=%llu record=%llu\n",
+                             probeDepth,
+                             static_cast<unsigned long long>(probeReturnAddress),
+                             static_cast<unsigned long long>(
+                                 record->instructionAddress));
+            }
+            startFramePointer = probeFramePointer;
+            startCallerSP = probeCallerSP;
+            break;
+        }
+
+        if (probeFramePointer == 0) {
+            break;
+        }
+
+        std::uintptr_t nextFramePointer = 0;
+        std::uintptr_t nextReturnAddress = 0;
+        std::memcpy(&nextFramePointer,
+                    reinterpret_cast<const void *>(probeFramePointer),
+                    sizeof(nextFramePointer));
+        std::memcpy(&nextReturnAddress,
+                    reinterpret_cast<const void *>(probeFramePointer +
+                                                   sizeof(std::uintptr_t)),
+                    sizeof(nextReturnAddress));
+
+        if (gcDebugEnabled()) {
+            std::fprintf(stderr,
+                         "mvm-gc: safepoint probe depth=%zu current=%llu next=%llu "
+                         "frame=%llu next_frame=%llu\n",
+                         probeDepth,
+                         static_cast<unsigned long long>(probeReturnAddress),
+                         static_cast<unsigned long long>(nextReturnAddress),
+                         static_cast<unsigned long long>(probeFramePointer),
+                         static_cast<unsigned long long>(nextFramePointer));
+        }
+
+        probeCallerSP = probeFramePointer + (2 * sizeof(std::uintptr_t));
+        probeReturnAddress = nextReturnAddress;
+        probeFramePointer = nextFramePointer;
+    }
+
     if (!record) {
+        if (gcDebugEnabled()) {
+            std::fprintf(stderr,
+                         "mvm-gc: missing safepoint for return=%llu caller_sp=%llu "
+                         "caller_bp=%llu records=%zu\n",
+                         static_cast<unsigned long long>(returnAddress),
+                         static_cast<unsigned long long>(callerSP),
+                         static_cast<unsigned long long>(callerBP),
+                         safepoints_.size());
+            for (std::size_t index = 0; index < safepoints_.size() && index < 8; ++index) {
+                std::fprintf(stderr, "mvm-gc: record[%zu]=%llu roots=%zu\n", index,
+                             static_cast<unsigned long long>(
+                                 safepoints_[index].instructionAddress),
+                             safepoints_[index].rootPairs.size());
+            }
+        }
         return makeError(makeMissingSafepointMessage(returnAddress));
     }
 
     GCRootScanSummary summary;
     summary.rootValues.reserve(32);
-    if (auto error = scanSingleManagedFrame(*record, callerSP, callerBP, summary)) {
+    if (auto error =
+            scanSingleManagedFrame(*record, startCallerSP, startFramePointer, summary)) {
         return std::move(error);
     }
 
-    std::uintptr_t framePointer = callerBP;
+    std::uintptr_t framePointer = startFramePointer;
     std::size_t walkedFrames = 0;
     constexpr std::size_t kMaxManagedFrameDepth = 256;
     while (framePointer != 0 && walkedFrames < kMaxManagedFrameDepth) {
@@ -901,6 +1510,9 @@ llvm::Expected<GCRootScanSummary> GCStackMapRegistry::scanCurrentSafepoint(
         }
 
         auto *callerRecord = findSafepointRecord(nextReturnAddress);
+        if (!callerRecord) {
+            callerRecord = findSafepointRecordForReturnAddress(nextReturnAddress);
+        }
         if (!callerRecord) {
             break;
         }
@@ -994,7 +1606,8 @@ bool isGCRequested() {
     return gcRequested.load(std::memory_order_acquire);
 }
 
-void handlePendingRuntimeGCSafepoint(std::uintptr_t *runtimeFrame) {
+void handlePendingRuntimeGCSafepoint(std::uintptr_t *runtimeFrame,
+                                     std::uint64_t statepointID) {
     if (!isGCRequested()) {
         return;
     }
@@ -1011,7 +1624,7 @@ void handlePendingRuntimeGCSafepoint(std::uintptr_t *runtimeFrame) {
     }
 
     (void)registry;
-    rememberCurrentRuntimeSafepointOrFatal(runtimeFrame);
+    rememberCurrentRuntimeSafepointOrFatal(runtimeFrame, statepointID);
 }
 
 }  // namespace mvm
@@ -1025,12 +1638,13 @@ extern "C" void __mvm_request_gc() {
     }
 }
 
-extern "C" __attribute__((noinline)) void __mvm_gc_safepoint_poll() {
+extern "C" __attribute__((noinline)) void __mvm_gc_safepoint_poll(
+    std::uint64_t statepointID) {
     if (!mvm::isGCRequested()) {
         return;
     }
 
     auto *runtimeFrame =
         reinterpret_cast<std::uintptr_t *>(__builtin_frame_address(0));
-    mvm::handlePendingRuntimeGCSafepoint(runtimeFrame);
+    mvm::handlePendingRuntimeGCSafepoint(runtimeFrame, statepointID);
 }

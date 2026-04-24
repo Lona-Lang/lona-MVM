@@ -173,6 +173,24 @@ Managed code already knows the element type statically, so runtime allocation
 APIs no longer accept user-supplied size, element-size, or alignment values
 that could conflict with `alloc type` metadata.
 
+For source-level portability, the repository now also carries a tiny shared
+memory surface under `share/`:
+
+- `newObject[T]()`
+- `newArray[T](count)`
+- `arrayLength[T](ptr)`
+- `freeObject[T](ptr)`
+
+The intended usage is to import `mem` from one of two include roots:
+
+- `-I share/managed` for managed builds
+- `-I share/native` for native builds
+
+That lets the same `lona` source switch allocation backends without rewriting
+the data-structure code itself. In the current draft, `freeObject[T]` is a real
+release operation in `share/native` and a deliberate no-op in
+`share/managed`.
+
 What is implemented now:
 
 - runtime allocation ABI
@@ -213,6 +231,25 @@ Run the bundled smoke coverage:
 
 ```bash
 make test
+```
+
+Run the fixed linked-list benchmark:
+
+```bash
+make bench-linked-list
+```
+
+The benchmark parameters are pinned in
+[`scripts/bench-linked-list.sh`](scripts/bench-linked-list.sh): `-O1`,
+`-Xm512M`, one warmup run, five measured runs, and a 120 second timeout. The
+script emits CSV-style summary rows so runs are comparable across changes.
+
+Current baseline on this machine:
+
+```text
+native,5,0.166000,0.150000,0.200000
+managed_heap_512M,5,1.606000,1.570000,1.690000
+managed/native_avg_ratio: 9.675x
 ```
 
 For managed payloads, `mvm` accepts `-O1`, `-O2`, and `-O3`. `-O0` is rejected.

@@ -9,12 +9,12 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace mvm {
 
 inline constexpr const char *kManagedGCStrategy = "statepoint-example";
-inline constexpr const char *kSafepointPollFunctionName = "gc.safepoint_poll";
 inline constexpr const char *kRuntimeSafepointPollSymbol =
     "__mvm_gc_safepoint_poll";
 inline constexpr const char *kManagedGCModuleMetadataName = "mvm.gc.module";
@@ -56,6 +56,7 @@ struct GCRootScanSummary {
 
 class GCStackMapRegistry {
 public:
+    void recordManagedFunctionOrder(const llvm::Module &module);
     llvm::Error registerObject(const llvm::object::ObjectFile &objectFile,
                                const llvm::RuntimeDyld::LoadedObjectInfo &loadedInfo);
     void recordRegistrationError(llvm::Error error);
@@ -63,14 +64,21 @@ public:
     llvm::Expected<GCRootScanSummary> scanCurrentSafepoint(std::uintptr_t returnAddress,
                                                            std::uintptr_t callerSP,
                                                            std::uintptr_t callerBP) const;
+    llvm::Expected<GCRootScanSummary> scanCurrentSafepointByID(
+        std::uint64_t statepointID, std::uintptr_t callerSP,
+        std::uintptr_t callerBP) const;
 
 private:
     struct SafepointRecord {
+        std::uint64_t id = 0;
+        std::uintptr_t functionAddress = 0;
+        std::uintptr_t functionEndAddress = 0;
         std::uintptr_t instructionAddress = 0;
         std::vector<GCRootLocationPair> rootPairs;
     };
 
     mutable std::mutex mutex_;
+    std::vector<std::string> managedFunctionOrder_;
     std::vector<SafepointRecord> safepoints_;
     llvm::Error pendingRegistrationError = llvm::Error::success();
 };
@@ -94,9 +102,10 @@ void configureManagedHeapLimit(std::uint64_t bytes);
 void requestGC();
 void clearGCRequest();
 bool isGCRequested();
-void handlePendingRuntimeGCSafepoint(std::uintptr_t *runtimeFrame);
+void handlePendingRuntimeGCSafepoint(std::uintptr_t *runtimeFrame,
+                                     std::uint64_t statepointID = 0);
 
 }  // namespace mvm
 
-extern "C" void __mvm_gc_safepoint_poll();
+extern "C" void __mvm_gc_safepoint_poll(std::uint64_t statepoint_id);
 extern "C" void __mvm_request_gc();

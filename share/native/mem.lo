@@ -1,0 +1,33 @@
+#[extern "C"]
+def malloc(size usize) u8*
+
+#[extern "C"]
+def free(ptr u8*)
+
+struct ArrayHeader {
+    set length usize
+}
+
+def newObject[T]() T* {
+    ret cast[T*](malloc(sizeof[T]()))
+}
+
+def newArray[T](element_count usize) T[*] {
+    var byte_count = sizeof[ArrayHeader]() + sizeof[T]() * element_count
+    var base = malloc(byte_count)
+    var header = cast[ArrayHeader*](base)
+    header.length = element_count
+    ret cast[T[*]](base + sizeof[ArrayHeader]())
+}
+
+def arrayLength[T](ptr T[*]) usize {
+    var header = cast[ArrayHeader*](ptr - sizeof[ArrayHeader]())
+    ret header.length
+}
+
+def freeObject[T](ptr T*) {
+    if ptr == null {
+        ret
+    }
+    free(cast[u8*](ptr))
+}

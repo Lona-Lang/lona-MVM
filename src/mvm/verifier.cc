@@ -33,10 +33,6 @@ void recordViolation(const llvm::Instruction &instruction,
     });
 }
 
-bool isRuntimeInjectedHelper(const llvm::Function &function) {
-    return function.getName() == "gc.safepoint_poll";
-}
-
 }  // namespace
 
 llvm::Error verifyLLVMModule(const llvm::Module &module, llvm::StringRef stage) {
@@ -66,7 +62,7 @@ llvm::Error ManagedVerifier::verify(const llvm::Module &module,
 
     for (const auto &function : module) {
         if (!function.isDeclaration() && !function.isIntrinsic() &&
-            !function.getSubprogram() && !isRuntimeInjectedHelper(function)) {
+            !function.getSubprogram()) {
             std::string instructionText;
             llvm::raw_string_ostream signature(instructionText);
             function.getFunctionType()->print(signature);

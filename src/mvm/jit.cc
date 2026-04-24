@@ -153,6 +153,9 @@ const std::shared_ptr<GCStackMapRegistry> &JitExecutor::getStackMaps() const {
 
 llvm::Error JitExecutor::addModule(std::unique_ptr<llvm::Module> module,
                                    std::unique_ptr<llvm::LLVMContext> context) {
+    if (stackMaps_) {
+        stackMaps_->recordManagedFunctionOrder(*module);
+    }
     return jit_->addIRModule(
         llvm::orc::ThreadSafeModule(std::move(module), std::move(context)));
 }
